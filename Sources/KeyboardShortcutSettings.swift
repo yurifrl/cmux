@@ -23,6 +23,7 @@ enum KeyboardShortcutSettings {
         case renameTab
         case renameWorkspace
         case closeWorkspace
+        case suspendWorkspace
         case newSurface
         case toggleTerminalCopyMode
 
@@ -62,6 +63,7 @@ enum KeyboardShortcutSettings {
             case .renameTab: return String(localized: "shortcut.renameTab.label", defaultValue: "Rename Tab")
             case .renameWorkspace: return String(localized: "shortcut.renameWorkspace.label", defaultValue: "Rename Workspace")
             case .closeWorkspace: return String(localized: "shortcut.closeWorkspace.label", defaultValue: "Close Workspace")
+            case .suspendWorkspace: return String(localized: "shortcut.suspendWorkspace.label", defaultValue: "Suspend Workspace")
             case .newSurface: return String(localized: "shortcut.newSurface.label", defaultValue: "New Surface")
             case .toggleTerminalCopyMode: return String(localized: "shortcut.toggleTerminalCopyMode.label", defaultValue: "Toggle Terminal Copy Mode")
             case .focusLeft: return String(localized: "shortcut.focusPaneLeft.label", defaultValue: "Focus Pane Left")
@@ -95,6 +97,7 @@ enum KeyboardShortcutSettings {
             case .renameTab: return "shortcut.renameTab"
             case .renameWorkspace: return "shortcut.renameWorkspace"
             case .closeWorkspace: return "shortcut.closeWorkspace"
+            case .suspendWorkspace: return "shortcut.suspendWorkspace"
             case .focusLeft: return "shortcut.focusLeft"
             case .focusRight: return "shortcut.focusRight"
             case .focusUp: return "shortcut.focusUp"
@@ -143,6 +146,8 @@ enum KeyboardShortcutSettings {
             case .renameWorkspace:
                 return StoredShortcut(key: "r", command: true, shift: true, option: false, control: false)
             case .closeWorkspace:
+                return StoredShortcut(key: "w", command: true, shift: true, option: false, control: false)
+            case .suspendWorkspace:
                 return StoredShortcut(key: "w", command: true, shift: true, option: false, control: false)
             case .focusLeft:
                 return StoredShortcut(key: "←", command: true, shift: false, option: true, control: false)
@@ -232,6 +237,7 @@ enum KeyboardShortcutSettings {
     static func prevSidebarTabShortcut() -> StoredShortcut { shortcut(for: .prevSidebarTab) }
     static func renameWorkspaceShortcut() -> StoredShortcut { shortcut(for: .renameWorkspace) }
     static func closeWorkspaceShortcut() -> StoredShortcut { shortcut(for: .closeWorkspace) }
+    static func suspendWorkspaceShortcut() -> StoredShortcut { shortcut(for: .suspendWorkspace) }
 
     static func focusLeftShortcut() -> StoredShortcut { shortcut(for: .focusLeft) }
     static func focusRightShortcut() -> StoredShortcut { shortcut(for: .focusRight) }

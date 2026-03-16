@@ -4514,6 +4514,8 @@ struct ContentView: View {
             return .openBrowser
         case "palette.closeWindow":
             return .closeWindow
+        case "palette.suspendWorkspace":
+            return .suspendWorkspace
         case "palette.toggleSidebar":
             return .toggleSidebar
         case "palette.showNotifications":
@@ -4558,7 +4560,7 @@ struct ContentView: View {
         case "palette.closeTab":
             return "⌘W"
         case "palette.closeWorkspace":
-            return "⌘⇧W"
+            return nil
         case "palette.reopenClosedBrowserTab":
             return "⌘⇧T"
         case "palette.openSettings":
@@ -4763,8 +4765,27 @@ struct ContentView: View {
                 commandId: "palette.closeWorkspace",
                 title: constant(String(localized: "command.closeWorkspace.title", defaultValue: "Close Workspace")),
                 subtitle: constant(String(localized: "command.closeWorkspace.subtitle", defaultValue: "Workspace")),
-                shortcutHint: "⌘⇧W",
                 keywords: ["close", "workspace"]
+            )
+        )
+        contributions.append(
+            CommandPaletteCommandContribution(
+                commandId: "palette.suspendWorkspace",
+                title: constant(String(localized: "command.suspendWorkspace.title", defaultValue: "Suspend Workspace")),
+                subtitle: workspaceSubtitle,
+                keywords: ["suspend", "workspace", "sleep", "archive", "save"]
+            )
+        )
+        contributions.append(
+            CommandPaletteCommandContribution(
+                commandId: "palette.restoreSuspendedWorkspace",
+                title: { _ in
+                    let count = SuspendedWorkspaceStore.shared.entries.count
+                    return String(localized: "command.restoreSuspended.title", defaultValue: "Restore Suspended Workspace (\(count))")
+                },
+                subtitle: constant(String(localized: "command.restoreSuspended.subtitle", defaultValue: "Workspace")),
+                keywords: ["restore", "suspended", "workspace", "resume", "recover"],
+                when: { _ in !SuspendedWorkspaceStore.shared.entries.isEmpty }
             )
         )
         contributions.append(
@@ -5395,6 +5416,22 @@ struct ContentView: View {
         }
         registry.register(commandId: "palette.closeWorkspace") {
             tabManager.closeCurrentWorkspaceWithConfirmation()
+        }
+        registry.register(commandId: "palette.suspendWorkspace") {
+            guard let selectedId = tabManager.selectedTabId,
+                  let workspace = tabManager.tabs.first(where: { $0.id == selectedId }) else {
+                NSSound.beep()
+                return
+            }
+            tabManager.suspendWorkspace(workspace)
+        }
+        registry.register(commandId: "palette.restoreSuspendedWorkspace") {
+            // Restore the most recently suspended workspace (top of the list).
+            guard let entry = SuspendedWorkspaceStore.shared.entries.last else {
+                NSSound.beep()
+                return
+            }
+            tabManager.restoreWorkspace(entryId: entry.id)
         }
         registry.register(commandId: "palette.closeWindow") {
             guard let window = observedWindow ?? NSApp.keyWindow ?? NSApp.mainWindow else {
@@ -7859,6 +7896,7 @@ struct VerticalTabsSidebar: View {
                 .background(Color.clear)
                 .modifier(ClearScrollBackground())
             }
+            SuspendedWorkspaceSidebarSection()
             SidebarFooter(updateViewModel: updateViewModel, onSendFeedback: onSendFeedback)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
@@ -8716,6 +8754,217 @@ private final class SidebarShortcutHintModifierMonitor: ObservableObject {
             NotificationCenter.default.removeObserver(hostWindowDidResignKeyObserver)
             self.hostWindowDidResignKeyObserver = nil
         }
+    }
+}
+
+// MARK: - Suspended Workspaces Sidebar Section
+
+private struct SuspendedWorkspaceSidebarSection: View {
+    @ObservedObject private var store = SuspendedWorkspaceStore.shared
+    @EnvironmentObject var tabManager: TabManager
+    @AppStorage("suspendedSectionCollapsed") private var isCollapsed = false
+
+    private var isExpanded: Bool {
+        get { !isCollapsed }
+    }
+
+    var body: some View {
+        if !store.entries.isEmpty {
+            VStack(spacing: 0) {
+                Divider()
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .opacity(0.5)
+
+                // Section header with disclosure toggle
+                Button {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        isCollapsed.toggle()
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 8, weight: .bold))
+                            .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                            .frame(width: 12)
+
+                        Text(String(
+                            localized: "sidebar.suspended.header",
+                            defaultValue: "Suspended"
+                        ))
+                        .font(.system(size: 11, weight: .medium))
+
+                        Text("\(store.entries.count)")
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+
+                        Spacer()
+
+                        if isExpanded {
+                            Button {
+                                store.removeAll()
+                            } label: {
+                                Text(String(
+                                    localized: "sidebar.suspended.clearAll",
+                                    defaultValue: "Clear All"
+                                ))
+                                .font(.system(size: 10, weight: .medium))
+                                .foregroundStyle(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityIdentifier("SuspendedWorkspacesClearAll")
+                        }
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 4)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier("SuspendedWorkspacesHeader")
+                .accessibilityLabel(String(
+                    localized: "sidebar.suspended.header.accessibilityLabel",
+                    defaultValue: "Suspended workspaces, \(store.entries.count) items"
+                ))
+
+                if isExpanded {
+                    LazyVStack(spacing: 1) {
+                        ForEach(store.entries.reversed()) { entry in
+                            SuspendedWorkspaceRow(entry: entry)
+                        }
+                    }
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+                }
+            }
+        }
+    }
+}
+
+private struct SuspendedWorkspaceRow: View {
+    let entry: SuspendedWorkspaceEntry
+    @EnvironmentObject var tabManager: TabManager
+    @ObservedObject private var store = SuspendedWorkspaceStore.shared
+    @State private var isHovering: Bool = false
+
+    private var subtitle: String? {
+        if let branch = entry.gitBranch, !branch.isEmpty {
+            return branch
+        }
+        if let dir = entry.directory, !dir.isEmpty {
+            // Show last path component for brevity
+            return (dir as NSString).lastPathComponent
+        }
+        return nil
+    }
+
+    private var suspendedTimeAgo: String {
+        let interval = Date.now.timeIntervalSince1970 - entry.suspendedAt
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .abbreviated
+        return formatter.localizedString(
+            fromTimeInterval: -interval
+        )
+    }
+
+    var body: some View {
+        Button {
+            tabManager.restoreWorkspace(entryId: entry.id)
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "moon.zzz")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.tertiary)
+                    .frame(width: 16)
+
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(entry.displayName)
+                        .font(.system(size: 12, weight: .medium))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+
+                    if let subtitle {
+                        Text(subtitle)
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                }
+
+                Spacer(minLength: 4)
+
+                Text(suspendedTimeAgo)
+                    .font(.system(size: 9))
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+
+                // Delete button — visible on hover
+                if isHovering {
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.15)) {
+                            store.remove(id: entry.id)
+                        }
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 9, weight: .medium))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 16, height: 16)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(String(
+                        localized: "sidebar.suspended.delete.accessibilityLabel",
+                        defaultValue: "Delete suspended workspace"
+                    ))
+                    .transition(.opacity)
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 5)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .background(
+            RoundedRectangle(cornerRadius: 5)
+                .fill(isHovering ? Color.primary.opacity(0.06) : Color.clear)
+                .padding(.horizontal, 4)
+        )
+        .onHover { hovering in
+            withAnimation(.easeInOut(duration: 0.12)) {
+                isHovering = hovering
+            }
+        }
+        .contextMenu {
+            Button {
+                tabManager.restoreWorkspace(entryId: entry.id)
+            } label: {
+                Text(String(
+                    localized: "sidebar.suspended.restore",
+                    defaultValue: "Restore Workspace"
+                ))
+            }
+
+            Divider()
+
+            Button(role: .destructive) {
+                store.remove(id: entry.id)
+            } label: {
+                Text(String(
+                    localized: "sidebar.suspended.delete",
+                    defaultValue: "Delete"
+                ))
+            }
+        }
+        .accessibilityIdentifier("SuspendedWorkspaceRow-\(entry.id.uuidString)")
+        .accessibilityLabel(String(
+            localized: "sidebar.suspended.row.accessibilityLabel",
+            defaultValue: "Suspended workspace: \(entry.displayName)"
+        ))
+        .accessibilityHint(String(
+            localized: "sidebar.suspended.row.accessibilityHint",
+            defaultValue: "Click to restore"
+        ))
     }
 }
 
@@ -10640,6 +10889,7 @@ private struct TabItemView: View, Equatable {
             isMulti: isMulti)
         let renameWorkspaceShortcut = KeyboardShortcutSettings.shortcut(for: .renameWorkspace)
         let closeWorkspaceShortcut = KeyboardShortcutSettings.shortcut(for: .closeWorkspace)
+        let suspendWorkspaceShortcut = KeyboardShortcutSettings.shortcut(for: .suspendWorkspace)
         Button(pinLabel) {
             for id in targetIds {
                 if let tab = tabManager.tabs.first(where: { $0.id == id }) {
@@ -10741,6 +10991,32 @@ private struct TabItemView: View, Equatable {
         .disabled(targetIds.isEmpty)
 
         Divider()
+
+        let suspendLabel = contextMenuLabel(
+            multi: String(localized: "contextMenu.suspendWorkspaces", defaultValue: "Suspend Workspaces"),
+            single: String(localized: "contextMenu.suspendWorkspace", defaultValue: "Suspend Workspace"),
+            isMulti: isMulti)
+        if let key = suspendWorkspaceShortcut.keyEquivalent {
+            Button(suspendLabel) {
+                suspendTabs(targetIds)
+            }
+            .keyboardShortcut(key, modifiers: suspendWorkspaceShortcut.eventModifiers)
+            .disabled(targetIds.isEmpty)
+        } else {
+            Button(suspendLabel) {
+                suspendTabs(targetIds)
+            }
+            .disabled(targetIds.isEmpty)
+        }
+
+        let closePermanentlyLabel = contextMenuLabel(
+            multi: String(localized: "contextMenu.closePermanentlyWorkspaces", defaultValue: "Close Permanently"),
+            single: String(localized: "contextMenu.closePermanentlyWorkspace", defaultValue: "Close Permanently"),
+            isMulti: isMulti)
+        Button(closePermanentlyLabel) {
+            closeTabs(targetIds, allowPinned: true)
+        }
+        .disabled(targetIds.isEmpty)
 
         if let key = closeWorkspaceShortcut.keyEquivalent {
             Button(closeLabel) {
@@ -10910,6 +11186,15 @@ private struct TabItemView: View, Equatable {
 
     private func closeTabs(_ targetIds: [UUID], allowPinned: Bool) {
         tabManager.closeWorkspacesWithConfirmation(targetIds, allowPinned: allowPinned)
+        syncSelectionAfterMutation()
+    }
+
+    private func suspendTabs(_ targetIds: [UUID]) {
+        for id in targetIds {
+            if let workspace = tabManager.tabs.first(where: { $0.id == id }) {
+                tabManager.suspendWorkspace(workspace)
+            }
+        }
         syncSelectionAfterMutation()
     }
 

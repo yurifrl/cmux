@@ -633,6 +633,10 @@ class TabManager: ObservableObject {
     /// Used to apply title updates to the correct window instead of NSApp.keyWindow.
     weak var window: NSWindow?
 
+    /// The global suspended workspace store. Set during window configuration so that
+    /// workspace suspend/restore operations can persist across windows and sessions.
+    weak var suspendedWorkspaceStore: SuspendedWorkspaceStore?
+
     @Published var tabs: [Workspace] = []
     @Published private(set) var isWorkspaceCycleHot: Bool = false
     @Published private(set) var pendingBackgroundWorkspaceLoadIds: Set<UUID> = []
@@ -1509,6 +1513,101 @@ class TabManager: ObservableObject {
         }
     }
 
+    // MARK: - Suspend / Restore Lifecycle
+
+    /// Suspend a workspace: snapshot its state, persist as a `SuspendedWorkspaceEntry`,
+    /// then close it via `closeWorkspace(_:)`. If the workspace is the only tab, the
+    /// suspend is silently skipped (you cannot leave a window with zero workspaces).
+    func suspendWorkspace(_ workspace: Workspace) {
+        guard tabs.count > 1 else { return }
+        guard let store = suspendedWorkspaceStore else { return }
+
+        let snapshot = workspace.sessionSnapshot(includeScrollback: true)
+        let displayName = workspace.customTitle
+            ?? workspace.title
+        let entry = SuspendedWorkspaceEntry(
+            id: UUID(),
+            originalWorkspaceId: workspace.id,
+            displayName: displayName,
+            directory: workspace.currentDirectory,
+            gitBranch: workspace.gitBranch?.branch,
+            suspendedAt: Date().timeIntervalSince1970,
+            snapshot: snapshot
+        )
+        store.add(entry)
+        sentryBreadcrumb("workspace.suspend", data: [
+            "tabCount": tabs.count - 1,
+            "entryId": entry.id.uuidString,
+        ])
+        closeWorkspace(workspace)
+    }
+
+    /// Restore a previously suspended workspace by its entry identifier.
+    /// The entry is removed from the store and a new `Workspace` is created from the
+    /// persisted snapshot, following the same pattern as `restoreSessionSnapshot(_:)`.
+    /// The restored workspace is appended to the end of the tab list and selected.
+    /// Returns the newly created `Workspace`, or `nil` if the entry was not found.
+    @discardableResult
+    func restoreWorkspace(entryId: UUID) -> Workspace? {
+        guard let store = suspendedWorkspaceStore else { return nil }
+        guard let entry = store.restore(id: entryId) else { return nil }
+
+        let workspaceSnapshot = entry.snapshot
+        let ordinal = Self.nextPortOrdinal
+        Self.nextPortOrdinal += 1
+        let workspace = Workspace(
+            title: workspaceSnapshot.processTitle,
+            workingDirectory: workspaceSnapshot.currentDirectory,
+            portOrdinal: ordinal
+        )
+        workspace.owningTabManager = self
+        workspace.restoreSessionSnapshot(workspaceSnapshot)
+        wireClosedBrowserTracking(for: workspace)
+
+        tabs.append(workspace)
+        sentryBreadcrumb("workspace.restore", data: [
+            "tabCount": tabs.count,
+            "entryId": entry.id.uuidString,
+        ])
+
+#if DEBUG
+        debugPrimeWorkspaceSwitchTrigger("restore", to: workspace.id)
+#endif
+        selectedTabId = workspace.id
+        NotificationCenter.default.post(
+            name: .ghosttyDidFocusTab,
+            object: nil,
+            userInfo: [GhosttyNotificationKey.tabId: workspace.id]
+        )
+        return workspace
+    }
+
+    /// Permanently close a workspace without suspending it. This behaves exactly like
+    /// `closeWorkspace(_:)` — provided as a semantic counterpart to `suspendWorkspace(_:)`
+    /// so callers can express intent when the user explicitly chooses "Close" over "Suspend".
+    func permanentlyCloseWorkspace(_ workspace: Workspace) {
+        closeWorkspace(workspace)
+    }
+
+    // MARK: - Suspend / Restore Policy Helpers (testable)
+
+    /// Whether a suspend operation is allowed given the current tab count and store availability.
+    static func shouldAllowSuspend(tabCount: Int, hasStore: Bool) -> Bool {
+        tabCount > 1 && hasStore
+    }
+
+    /// Whether a restore operation is allowed given store availability.
+    static func shouldAllowRestore(hasStore: Bool) -> Bool {
+        hasStore
+    }
+
+    /// Compute the new selection index after closing a workspace at `closedIndex`
+    /// out of `tabCount` tabs (before removal).
+    static func selectionIndexAfterClose(closedIndex: Int, tabCount: Int) -> Int {
+        guard tabCount > 1 else { return 0 }
+        return min(closedIndex, max(0, tabCount - 2))
+    }
+
     /// Detach a workspace from this window without closing its panels.
     /// Used by the socket API for cross-window moves.
     @discardableResult
@@ -1809,6 +1908,10 @@ class TabManager: ObservableObject {
             } else {
                 AppDelegate.shared?.closeMainWindowContainingTabId(workspace.id)
             }
+        } else if workspace.hasMeaningfulState, suspendedWorkspaceStore != nil {
+            // Suspend instead of permanently closing when the workspace has
+            // accumulated state worth preserving and the store is available.
+            suspendWorkspace(workspace)
         } else {
             closeWorkspace(workspace)
         }

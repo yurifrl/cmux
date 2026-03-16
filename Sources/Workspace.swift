@@ -3551,6 +3551,42 @@ final class Workspace: Identifiable, ObservableObject {
         return false
     }
 
+    /// Whether this workspace has accumulated state worth preserving on close.
+    /// Returns `true` if the workspace has a custom title, custom color, status/log
+    /// entries, git branch info, is pinned, has multiple panels (user created splits),
+    /// or any terminal panel has a live surface (meaning the shell has started and
+    /// likely produced output). Also checks for running child processes and
+    /// non-default terminal titles as indicators of meaningful activity.
+    var hasMeaningfulState: Bool {
+        if customTitle != nil { return true }
+        if customColor != nil { return true }
+        if isPinned { return true }
+        if !statusEntries.isEmpty { return true }
+        if !logEntries.isEmpty { return true }
+        if gitBranch != nil { return true }
+        if panels.count > 1 { return true }
+        // Check terminal panels for surface existence, running processes, and
+        // non-default titles indicating meaningful activity.
+        for panel in panels.values {
+            if let terminalPanel = panel as? TerminalPanel {
+                // The terminal surface has been loaded — the shell started.
+                if terminalPanel.surface.surface != nil {
+                    return true
+                }
+                // A running child process implies the terminal has accumulated output.
+                if terminalPanel.needsConfirmClose() {
+                    return true
+                }
+                // A title that differs from the default indicates a command has run
+                // and produced enough activity to update the process title.
+                if terminalPanel.title != "Terminal" && !terminalPanel.title.isEmpty {
+                    return true
+                }
+            }
+        }
+        return false
+    }
+
     private func reconcileFocusState() {
         guard !isReconcilingFocusState else { return }
         isReconcilingFocusState = true

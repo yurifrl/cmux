@@ -156,7 +156,8 @@ jobs:
     if: |
       (needs.sync.outputs.has_changes == 'true' && needs.sync.outputs.sync_status == 'success') ||
       (github.event_name == 'workflow_dispatch' && needs.sync.outputs.sync_status != 'failed')
-    runs-on: macos-latest
+    runs-on: macos-15
+    timeout-minutes: 60
     outputs:
       build_status: ${{ steps.build_result.outputs.status }}
     steps:

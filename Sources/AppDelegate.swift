@@ -2364,6 +2364,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         TerminalController.shared.stop()
         VSCodeServeWebController.shared.stop()
         BrowserHistoryStore.shared.flushPendingSaves()
+        SuspendedWorkspaceStore.shared.save()
         if TelemetrySettings.enabledForCurrentLaunch {
             PostHogAnalytics.shared.flush()
         }
@@ -2385,6 +2386,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         self.tabManager = tabManager
         self.notificationStore = notificationStore
         self.sidebarState = sidebarState
+        tabManager.suspendedWorkspaceStore = SuspendedWorkspaceStore.shared
         disableSuddenTerminationIfNeeded()
         installLifecycleSnapshotObserversIfNeeded()
         prepareStartupSessionSnapshotIfNeeded()
@@ -5456,12 +5458,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             selection: sessionWindowSnapshot?.sidebar.selection.sidebarSelection ?? .tabs
         )
         let notificationStore = TerminalNotificationStore.shared
+        let suspendedWorkspaceStore = SuspendedWorkspaceStore.shared
+        tabManager.suspendedWorkspaceStore = suspendedWorkspaceStore
 
         let root = ContentView(updateViewModel: updateViewModel, windowId: windowId)
             .environmentObject(tabManager)
             .environmentObject(notificationStore)
             .environmentObject(sidebarState)
             .environmentObject(sidebarSelectionState)
+            .environmentObject(suspendedWorkspaceStore)
 
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 460, height: 360),
