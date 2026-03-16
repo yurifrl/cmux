@@ -1,0 +1,308 @@
+name: Sync Upstream
+
+on:
+  schedule:
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    outputs:
+      sync_status: ${{ steps.result.outputs.status }}
+      sync_method: ${{ steps.result.outputs.method }}
+      changelog: ${{ steps.changelog.outputs.log }}
+      has_changes: ${{ steps.changelog.outputs.has_changes }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+          submodules: recursive
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/manaflow-ai/cmux.git
+          git fetch upstream main
+
+      - name: Check for changes
+        id: check
+        run: |
+          BEHIND=$(git rev-list --count HEAD..upstream/main)
+          echo "behind=$BEHIND" >> "$GITHUB_OUTPUT"
+          if [ "$BEHIND" -eq 0 ]; then
+            echo "Already up to date"
+          else
+            echo "$BEHIND commits behind upstream"
+          fi
+
+      # Build changelog BEFORE merging so we capture what's incoming
+      - name: Build changelog
+        id: changelog
+        if: steps.check.outputs.behind != '0'
+        run: |
+          LOG=$(git log --oneline --no-merges HEAD..upstream/main | head -50)
+          COUNT=$(git rev-list --count HEAD..upstream/main)
+
+          # For the output (escaped for GH actions)
+          {
+            echo "log<<CHANGELOG_EOF"
+            echo "$LOG"
+            echo "CHANGELOG_EOF"
+          } >> "$GITHUB_OUTPUT"
+          echo "has_changes=true" >> "$GITHUB_OUTPUT"
+          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+
+          # Write to file for commit
+          DATESTAMP=$(date -u +"%Y-%m-%d %H:%M UTC")
+          {
+            echo "## Sync $DATESTAMP — $COUNT commits from upstream"
+            echo ""
+            echo "$LOG" | sed 's/^/- /'
+            echo ""
+          } > /tmp/sync-entry.md
+
+      # --- Merge strategies ---
+
+      - name: Try fast-forward
+        id: ff
+        if: steps.check.outputs.behind != '0'
+        continue-on-error: true
+        run: git merge --ff-only upstream/main
+
+      - name: Try merge favoring ours
+        id: merge_ours
+        if: steps.check.outputs.behind != '0' && steps.ff.outcome == 'failure'
+        continue-on-error: true
+        run: |
+          git reset --hard origin/main
+          git merge -X ours upstream/main -m "sync: merge upstream (favor ours)"
+
+      - name: Claude Code resolve conflicts
+        id: claude
+        if: steps.check.outputs.behind != '0' && steps.ff.outcome == 'failure' && steps.merge_ours.outcome == 'failure'
+        continue-on-error: true
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          npm install -g @anthropic-ai/claude-code
+
+          git reset --hard origin/main
+          git merge upstream/main --no-commit || true
+
+          claude -p "You are resolving git merge conflicts in this repo.
+
+          Rules:
+          1. FAVOR our changes (HEAD) over upstream when intent conflicts
+          2. Accept upstream changes that don't conflict with our modifications
+          3. Run any available tests/build to verify the resolution works
+          4. Stage and commit resolved files
+
+          Steps:
+          1. List conflicted files with: git diff --name-only --diff-filter=U
+          2. For each file, understand BOTH sides and resolve intelligently
+          3. Run build/tests if available to verify nothing is broken
+          4. git add and git commit -m 'sync: claude-resolved merge (favoring ours)'"
+
+      # --- Determine result ---
+
+      - name: Set result
+        id: result
+        run: |
+          if [ "${{ steps.check.outputs.behind }}" = "0" ]; then
+            echo "status=up-to-date" >> "$GITHUB_OUTPUT"
+            echo "method=none" >> "$GITHUB_OUTPUT"
+          elif [ "${{ steps.ff.outcome }}" = "success" ]; then
+            echo "status=success" >> "$GITHUB_OUTPUT"
+            echo "method=fast-forward" >> "$GITHUB_OUTPUT"
+          elif [ "${{ steps.merge_ours.outcome }}" = "success" ]; then
+            echo "status=success" >> "$GITHUB_OUTPUT"
+            echo "method=merge-favor-ours" >> "$GITHUB_OUTPUT"
+          elif [ "${{ steps.claude.outcome }}" = "success" ]; then
+            echo "status=success" >> "$GITHUB_OUTPUT"
+            echo "method=claude-resolved" >> "$GITHUB_OUTPUT"
+          else
+            echo "status=failed" >> "$GITHUB_OUTPUT"
+            echo "method=none" >> "$GITHUB_OUTPUT"
+          fi
+
+      # --- Append changelog & push ---
+
+      - name: Update SYNC_CHANGELOG.md
+        if: steps.result.outputs.status == 'success'
+        run: |
+          if [ -f SYNC_CHANGELOG.md ]; then
+            cat /tmp/sync-entry.md SYNC_CHANGELOG.md > /tmp/merged-changelog.md
+            mv /tmp/merged-changelog.md SYNC_CHANGELOG.md
+          else
+            cp /tmp/sync-entry.md SYNC_CHANGELOG.md
+          fi
+          git add SYNC_CHANGELOG.md
+          git commit --amend --no-edit || git commit -m "sync: update changelog"
+
+      - name: Push
+        if: steps.result.outputs.status == 'success'
+        run: git push origin main
+
+  # --- Build on new changes ---
+
+  build:
+    needs: sync
+    if: needs.sync.outputs.has_changes == 'true' && needs.sync.outputs.sync_status == 'success'
+    runs-on: macos-latest
+    outputs:
+      build_status: ${{ steps.build_result.outputs.status }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          submodules: recursive
+
+      - name: Select Xcode
+        run: |
+          set -euo pipefail
+          if [ -d "/Applications/Xcode.app/Contents/Developer" ]; then
+            XCODE_DIR="/Applications/Xcode.app/Contents/Developer"
+          else
+            XCODE_APP="$(ls -d /Applications/Xcode*.app 2>/dev/null | head -n 1 || true)"
+            if [ -n "$XCODE_APP" ]; then
+              XCODE_DIR="$XCODE_APP/Contents/Developer"
+            else
+              echo "No Xcode.app found" >&2; exit 1
+            fi
+          fi
+          echo "DEVELOPER_DIR=$XCODE_DIR" >> "$GITHUB_ENV"
+          xcodebuild -version
+
+      - name: Install zig
+        run: brew install zig
+
+      - name: Download pre-built GhosttyKit
+        run: ./scripts/download-prebuilt-ghosttykit.sh
+
+      - name: Cache Swift packages
+        uses: actions/cache@v4
+        with:
+          path: .spm-cache
+          key: spm-${{ hashFiles('GhosttyTabs.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved') }}
+          restore-keys: spm-
+
+      - name: Build cmux
+        id: build_result
+        run: |
+          set -euo pipefail
+          xcodebuild -scheme cmux -configuration Release -derivedDataPath build \
+            -clonedSourcePackagesDirPath .spm-cache \
+            CODE_SIGNING_ALLOWED=NO build
+          echo "status=success" >> "$GITHUB_OUTPUT"
+
+      - name: Package .app
+        if: steps.build_result.outputs.status == 'success'
+        run: |
+          APP_PATH="build/Build/Products/Release/cmux.app"
+          tar czf cmux-macos-unsigned.tar.gz -C "$(dirname "$APP_PATH")" "$(basename "$APP_PATH")"
+
+      - name: Create release
+        if: steps.build_result.outputs.status == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="sync-$(date -u +%Y%m%d-%H%M%S)"
+          gh release create "$TAG" \
+            cmux-macos-unsigned.tar.gz \
+            --title "Sync build $TAG" \
+            --notes "Auto-built from upstream sync. Unsigned — for personal use." \
+            --prerelease
+
+  # --- Discord notifications ---
+
+  notify:
+    runs-on: ubuntu-latest
+    needs: [sync, build]
+    if: always()
+    steps:
+      - name: Discord — synced + build succeeded
+        if: needs.sync.outputs.sync_status == 'success' && needs.sync.outputs.has_changes == 'true' && needs.build.result == 'success'
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          CHANGELOG=$(echo "${{ needs.sync.outputs.changelog }}" | head -30)
+          if [ ${#CHANGELOG} -gt 1000 ]; then
+            CHANGELOG="${CHANGELOG:0:1000}..."
+          fi
+
+          RELEASE_URL="${{ github.server_url }}/${{ github.repository }}/releases"
+
+          curl -s -H "Content-Type: application/json" \
+            -d "$(jq -n \
+              --arg method "${{ needs.sync.outputs.sync_method }}" \
+              --arg changelog "$CHANGELOG" \
+              --arg repo "${{ github.repository }}" \
+              --arg url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+              --arg release "$RELEASE_URL" \
+              '{
+                embeds: [{
+                  title: "✅ Fork synced + built",
+                  description: ("**" + $repo + "** synced via **" + $method + "** and built successfully"),
+                  color: 5025616,
+                  fields: [
+                    { name: "Changes from upstream", value: ("```\n" + $changelog + "\n```"), inline: false },
+                    { name: "Download", value: ("[Latest release](" + $release + ")"), inline: true },
+                    { name: "Action run", value: ("[View logs](" + $url + ")"), inline: true }
+                  ]
+                }]
+              }')" \
+            "$DISCORD_WEBHOOK"
+
+      - name: Discord — synced but build failed
+        if: needs.sync.outputs.sync_status == 'success' && needs.sync.outputs.has_changes == 'true' && needs.build.result == 'failure'
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          CHANGELOG=$(echo "${{ needs.sync.outputs.changelog }}" | head -30)
+
+          curl -s -H "Content-Type: application/json" \
+            -d "$(jq -n \
+              --arg repo "${{ github.repository }}" \
+              --arg url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+              --arg changelog "$CHANGELOG" \
+              '{
+                embeds: [{
+                  title: "⚠️ Fork synced but build FAILED",
+                  description: ("**" + $repo + "** merged OK but xcodebuild failed. Check logs."),
+                  color: 16744448,
+                  fields: [
+                    { name: "Changes from upstream", value: ("```\n" + $changelog + "\n```"), inline: false },
+                    { name: "Action run", value: ("[View logs](" + $url + ")"), inline: true }
+                  ]
+                }]
+              }')" \
+            "$DISCORD_WEBHOOK"
+
+      - name: Discord — sync failed
+        if: needs.sync.outputs.sync_status == 'failed'
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          curl -s -H "Content-Type: application/json" \
+            -d "$(jq -n \
+              --arg repo "${{ github.repository }}" \
+              --arg url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+              --arg changelog "${{ needs.sync.outputs.changelog }}" \
+              '{
+                embeds: [{
+                  title: "🔴 Fork sync FAILED",
+                  description: ("All merge strategies failed for **" + $repo + "**. Manual intervention needed."),
+                  color: 16711680,
+                  fields: [
+                    { name: "Attempted upstream changes", value: ("```\n" + $changelog + "\n```"), inline: false },
+                    { name: "Action run", value: ("[View logs](" + $url + ")"), inline: true }
+                  ]
+                }]
+              }')" \
+            "$DISCORD_WEBHOOK"
