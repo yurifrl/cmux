@@ -153,7 +153,9 @@ jobs:
 
   build:
     needs: sync
-    if: needs.sync.outputs.has_changes == 'true' && needs.sync.outputs.sync_status == 'success'
+    if: |
+      (needs.sync.outputs.has_changes == 'true' && needs.sync.outputs.sync_status == 'success') ||
+      (github.event_name == 'workflow_dispatch' && needs.sync.outputs.sync_status != 'failed')
     runs-on: macos-latest
     outputs:
       build_status: ${{ steps.build_result.outputs.status }}
@@ -227,7 +229,7 @@ jobs:
     if: always()
     steps:
       - name: Discord — synced + build succeeded
-        if: needs.sync.outputs.sync_status == 'success' && needs.sync.outputs.has_changes == 'true' && needs.build.result == 'success'
+        if: needs.build.result == 'success'
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
@@ -260,7 +262,7 @@ jobs:
             "$DISCORD_WEBHOOK"
 
       - name: Discord — synced but build failed
-        if: needs.sync.outputs.sync_status == 'success' && needs.sync.outputs.has_changes == 'true' && needs.build.result == 'failure'
+        if: needs.build.result == 'failure'
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
