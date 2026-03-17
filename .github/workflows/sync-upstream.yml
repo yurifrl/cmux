@@ -7,7 +7,6 @@ on:
 
 permissions:
   contents: write
-  workflows: write
 
 jobs:
   sync:
@@ -111,6 +110,16 @@ jobs:
           4. git add and git commit -m 'sync: claude-resolved merge (favoring ours)'"
 
       # --- Determine result ---
+
+      # Upstream may change workflow files; GITHUB_TOKEN can't push those.
+      # Restore our workflow dir after merge to avoid push rejection.
+      - name: Restore our workflow files
+        if: steps.check.outputs.behind != '0'
+        run: |
+          git checkout origin/main -- .github/workflows/ 2>/dev/null || true
+          if ! git diff --cached --quiet .github/workflows/; then
+            git commit --amend --no-edit
+          fi
 
       - name: Set result
         id: result

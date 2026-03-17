@@ -5431,7 +5431,7 @@ struct ContentView: View {
                 NSSound.beep()
                 return
             }
-            tabManager.restoreWorkspace(entryId: entry.id)
+            _ = tabManager.restoreWorkspace(entryId: entry.id)
         }
         registry.register(commandId: "palette.closeWindow") {
             guard let window = observedWindow ?? NSApp.keyWindow ?? NSApp.mainWindow else {
@@ -8864,9 +8864,13 @@ private struct SuspendedWorkspaceRow: View {
         )
     }
 
+    private var hoverBackground: Color {
+        isHovering ? Color.primary.opacity(0.06) : Color.primary.opacity(0)
+    }
+
     var body: some View {
         Button {
-            tabManager.restoreWorkspace(entryId: entry.id)
+            _ = tabManager.restoreWorkspace(entryId: entry.id)
         } label: {
             HStack(spacing: 6) {
                 Image(systemName: "moon.zzz")
@@ -8900,7 +8904,7 @@ private struct SuspendedWorkspaceRow: View {
                 if isHovering {
                     Button {
                         withAnimation(.easeInOut(duration: 0.15)) {
-                            store.remove(id: entry.id)
+                            _ = store.remove(id: entry.id)
                         }
                     } label: {
                         Image(systemName: "xmark")
@@ -8924,7 +8928,7 @@ private struct SuspendedWorkspaceRow: View {
         .buttonStyle(.plain)
         .background(
             RoundedRectangle(cornerRadius: 5)
-                .fill(isHovering ? Color.primary.opacity(0.06) : Color.clear)
+                .fill(hoverBackground)
                 .padding(.horizontal, 4)
         )
         .onHover { hovering in
@@ -8934,7 +8938,7 @@ private struct SuspendedWorkspaceRow: View {
         }
         .contextMenu {
             Button {
-                tabManager.restoreWorkspace(entryId: entry.id)
+                _ = tabManager.restoreWorkspace(entryId: entry.id)
             } label: {
                 Text(String(
                     localized: "sidebar.suspended.restore",
@@ -8945,7 +8949,7 @@ private struct SuspendedWorkspaceRow: View {
             Divider()
 
             Button(role: .destructive) {
-                store.remove(id: entry.id)
+                _ = store.remove(id: entry.id)
             } label: {
                 Text(String(
                     localized: "sidebar.suspended.delete",
@@ -8954,8 +8958,7 @@ private struct SuspendedWorkspaceRow: View {
             }
         }
         .accessibilityIdentifier("SuspendedWorkspaceRow-\(entry.id.uuidString)")
-        .accessibilityLabel(Text(verbatim: "Suspended workspace: " + entry.displayName))
-        .accessibilityHint(Text(verbatim: "Click to restore"))
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -10983,6 +10986,7 @@ private struct TabItemView: View, Equatable {
 
         Divider()
 
+        let canSuspend = targetIds.isEmpty == false && tabManager.tabs.count > 1
         let suspendLabel = contextMenuLabel(
             multi: String(localized: "contextMenu.suspendWorkspaces", defaultValue: "Suspend Workspaces"),
             single: String(localized: "contextMenu.suspendWorkspace", defaultValue: "Suspend Workspace"),
@@ -10992,12 +10996,12 @@ private struct TabItemView: View, Equatable {
                 suspendTabs(targetIds)
             }
             .keyboardShortcut(key, modifiers: suspendWorkspaceShortcut.eventModifiers)
-            .disabled(targetIds.isEmpty)
+            .disabled(!canSuspend)
         } else {
             Button(suspendLabel) {
                 suspendTabs(targetIds)
             }
-            .disabled(targetIds.isEmpty)
+            .disabled(!canSuspend)
         }
 
         let closePermanentlyLabel = contextMenuLabel(
