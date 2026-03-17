@@ -41,7 +41,6 @@ jobs:
             echo "$BEHIND commits behind upstream"
           fi
 
-      # Build changelog BEFORE merging so we capture what's incoming
       - name: Build changelog
         id: changelog
         if: steps.check.outputs.behind != '0'
@@ -49,7 +48,6 @@ jobs:
           LOG=$(git log --oneline --no-merges HEAD..upstream/main | head -50)
           COUNT=$(git rev-list --count HEAD..upstream/main)
 
-          # For the output (escaped for GH actions)
           {
             echo "log<<CHANGELOG_EOF"
             echo "$LOG"
@@ -58,7 +56,6 @@ jobs:
           echo "has_changes=true" >> "$GITHUB_OUTPUT"
           echo "count=$COUNT" >> "$GITHUB_OUTPUT"
 
-          # Write to file for commit
           DATESTAMP=$(date -u +"%Y-%m-%d %H:%M UTC")
           {
             echo "## Sync $DATESTAMP — $COUNT commits from upstream"
@@ -91,28 +88,21 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
           npm install -g @anthropic-ai/claude-code
-
           git reset --hard origin/main
           git merge upstream/main --no-commit || true
-
           claude -p "You are resolving git merge conflicts in this repo.
-
           Rules:
           1. FAVOR our changes (HEAD) over upstream when intent conflicts
           2. Accept upstream changes that don't conflict with our modifications
           3. Run any available tests/build to verify the resolution works
           4. Stage and commit resolved files
-
           Steps:
           1. List conflicted files with: git diff --name-only --diff-filter=U
           2. For each file, understand BOTH sides and resolve intelligently
           3. Run build/tests if available to verify nothing is broken
           4. git add and git commit -m 'sync: claude-resolved merge (favoring ours)'"
 
-      # --- Determine result ---
-
-      # Upstream may change workflow files; GITHUB_TOKEN can't push those.
-      # Restore our workflow dir after merge to avoid push rejection.
+      # Restore our workflow files so GITHUB_TOKEN can push
       - name: Restore our workflow files
         if: steps.check.outputs.behind != '0'
         run: |
@@ -141,8 +131,6 @@ jobs:
             echo "method=none" >> "$GITHUB_OUTPUT"
           fi
 
-      # --- Append changelog & push ---
-
       - name: Update SYNC_CHANGELOG.md
         if: steps.result.outputs.status == 'success'
         run: |
@@ -159,7 +147,7 @@ jobs:
         if: steps.result.outputs.status == 'success'
         run: git push origin main
 
-  # --- Build on new changes ---
+  # --- Build ---
 
   build:
     needs: sync
@@ -168,8 +156,6 @@ jobs:
       (github.event_name == 'workflow_dispatch' && needs.sync.outputs.sync_status != 'failed')
     runs-on: macos-15
     timeout-minutes: 60
-    outputs:
-      build_status: ${{ steps.build_result.outputs.status }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -180,18 +166,20 @@ jobs:
         run: |
           set -euo pipefail
           XCODE_APP="$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort | tail -n 1 || true)"
-          if [ -z "$XCODE_APP" ]; then
-            XCODE_APP="/Applications/Xcode.app"
-          fi
+          if [ -z "$XCODE_APP" ]; then XCODE_APP="/Applications/Xcode.app"; fi
           XCODE_DIR="$XCODE_APP/Contents/Developer"
-          if [ ! -d "$XCODE_DIR" ]; then
-            echo "No Xcode found under /Applications" >&2; exit 1
-          fi
+          [ -d "$XCODE_DIR" ] || { echo "No Xcode found" >&2; exit 1; }
           echo "Selected: $XCODE_APP"
           echo "DEVELOPER_DIR=$XCODE_DIR" >> "$GITHUB_ENV"
           export DEVELOPER_DIR="$XCODE_DIR"
           xcodebuild -version
           xcrun --sdk macosx --show-sdk-path
+
+      - name: Install zig
+        run: |
+          if ! command -v zig >/dev/null 2>&1; then
+            brew install zig
+          fi
 
       - name: Download pre-built GhosttyKit
         run: ./scripts/download-prebuilt-ghosttykit.sh
@@ -229,17 +217,13 @@ jobs:
             CODE_SIGNING_ALLOWED=NO build
           echo "status=success" >> "$GITHUB_OUTPUT"
 
-      - name: Package .app
-        if: steps.build_result.outputs.status == 'success'
-        run: |
-          APP_PATH="build/Build/Products/Release/cmux.app"
-          tar czf cmux-macos-unsigned.tar.gz -C "$(dirname "$APP_PATH")" "$(basename "$APP_PATH")"
-
-      - name: Create release
+      - name: Package and release
         if: steps.build_result.outputs.status == 'success'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          APP_PATH="build/Build/Products/Release/cmux.app"
+          tar czf cmux-macos-unsigned.tar.gz -C "$(dirname "$APP_PATH")" "$(basename "$APP_PATH")"
           TAG="sync-$(date -u +%Y%m%d-%H%M%S)"
           gh release create "$TAG" \
             cmux-macos-unsigned.tar.gz \
@@ -247,7 +231,7 @@ jobs:
             --notes "Auto-built from upstream sync. Unsigned — for personal use." \
             --prerelease
 
-  # --- Discord notifications ---
+  # --- Discord ---
 
   notify:
     runs-on: ubuntu-latest
@@ -258,20 +242,20 @@ jobs:
         if: needs.build.result == 'success'
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          CHANGELOG: ${{ needs.sync.outputs.changelog }}
+          METHOD: ${{ needs.sync.outputs.sync_method }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RELEASE_URL: ${{ github.server_url }}/${{ github.repository }}/releases
         run: |
-          CHANGELOG=$(echo "${{ needs.sync.outputs.changelog }}" | head -30)
-          if [ ${#CHANGELOG} -gt 1000 ]; then
-            CHANGELOG="${CHANGELOG:0:1000}..."
-          fi
-
-          RELEASE_URL="${{ github.server_url }}/${{ github.repository }}/releases"
-
+          LOG=$(echo "$CHANGELOG" | head -30)
+          [ ${#LOG} -gt 1000 ] && LOG="${LOG:0:1000}..."
           curl -s -H "Content-Type: application/json" \
             -d "$(jq -n \
-              --arg method "${{ needs.sync.outputs.sync_method }}" \
-              --arg changelog "$CHANGELOG" \
-              --arg repo "${{ github.repository }}" \
-              --arg url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+              --arg method "$METHOD" \
+              --arg changelog "$LOG" \
+              --arg repo "$REPO" \
+              --arg url "$RUN_URL" \
               --arg release "$RELEASE_URL" \
               '{
                 embeds: [{
@@ -291,14 +275,17 @@ jobs:
         if: needs.build.result == 'failure'
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          CHANGELOG: ${{ needs.sync.outputs.changelog }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          CHANGELOG=$(echo "${{ needs.sync.outputs.changelog }}" | head -30)
-
+          LOG=$(echo "$CHANGELOG" | head -30)
+          [ ${#LOG} -gt 1000 ] && LOG="${LOG:0:1000}..."
           curl -s -H "Content-Type: application/json" \
             -d "$(jq -n \
-              --arg repo "${{ github.repository }}" \
-              --arg url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
-              --arg changelog "$CHANGELOG" \
+              --arg repo "$REPO" \
+              --arg url "$RUN_URL" \
+              --arg changelog "$LOG" \
               '{
                 embeds: [{
                   title: "⚠️ Fork synced but build FAILED",
@@ -316,12 +303,17 @@ jobs:
         if: needs.sync.outputs.sync_status == 'failed'
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          CHANGELOG: ${{ needs.sync.outputs.changelog }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
+          LOG=$(echo "$CHANGELOG" | head -30)
+          [ ${#LOG} -gt 1000 ] && LOG="${LOG:0:1000}..."
           curl -s -H "Content-Type: application/json" \
             -d "$(jq -n \
-              --arg repo "${{ github.repository }}" \
-              --arg url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
-              --arg changelog "${{ needs.sync.outputs.changelog }}" \
+              --arg repo "$REPO" \
+              --arg url "$RUN_URL" \
+              --arg changelog "$LOG" \
               '{
                 embeds: [{
                   title: "🔴 Fork sync FAILED",

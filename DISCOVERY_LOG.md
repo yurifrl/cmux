@@ -172,3 +172,59 @@ When restored:
 ### Remaining Minor Items
 - Task 4.4 (Option+click close button for permanent close) — deferred, requires detecting modifier flags in the SwiftUI button action which is non-trivial in this architecture
 - Task 6.1 (max workspace limit guard) — deferred, the 128-workspace limit is practically unreachable
+
+---
+
+## 2026-03-17: Architecture Pivot — Live Process Persistence Required
+
+### The Problem
+The snapshot-based approach (v1) doesn't meet the user's core need. They want Zellij-style sessions: 
+**close a workspace, come back later, processes are still running.**
+
+Current implementation only preserves scrollback text and layout — running processes are killed on suspend.
+
+### Why This Is Hard
+cmux terminals are created through libghostty (`ghostty_surface_new`), which manages its own PTY. 
+Each `GhosttySurfaceView` owns a ghostty surface that directly holds the PTY file descriptor.
+There is no intermediate mux layer.
+
+### Possible Approaches
+
+#### A: Wrap terminals in tmux/zellij sessions (most pragmatic)
+- Each workspace spawns its terminals inside a tmux/zellij session
+- "Suspend" = detach from the mux session, destroy the ghostty surfaces
+- "Restore" = reattach to the mux session, create new ghostty surfaces connected to existing PTYs
+- **Pros**: Leverages battle-tested mux; processes survive; scrollback preserved
+- **Cons**: Dependency on tmux/zellij; need to bridge ghostty surface ↔ mux PTY; 
+  tmux's own UI (status bar, key bindings) would need to be suppressed
+
+#### B: Use abduco/dtach as minimal PTY wrapper
+- Lighter than tmux — just PTY persistence, no windowing
+- Each terminal panel runs through abduco which holds the PTY
+- "Suspend" = disconnect from abduco socket
+- "Restore" = reconnect to abduco socket
+- **Pros**: Minimal, no UI conflicts
+- **Cons**: Less mature; still need to bridge ghostty ↔ external PTY
+
+#### C: Build a custom PTY daemon (cmuxd already exists)
+- cmuxd already exists in the repo as a Zig binary
+- Could extend it to hold PTYs and forward I/O to ghostty surfaces
+- "Suspend" = cmuxd keeps PTY alive, ghostty surface destroyed
+- "Restore" = new ghostty surface connects to cmuxd-held PTY
+- **Pros**: Full control; no external deps; already have the daemon
+- **Cons**: Significant engineering; PTY forwarding is complex
+
+#### D: Use ghostty's own multiplexing (if it exists)
+- Ghostty may have built-in mux support (it's based on libvaxis concepts)
+- Need to investigate ghostty's source for session/mux capabilities
+- **Pros**: Native integration
+- **Cons**: May not exist; upstream dependency
+
+### Recommendation
+Approach A (tmux) or C (cmuxd) are most viable. Need to investigate cmuxd's current capabilities
+and whether ghostty surfaces can be reconnected to existing PTYs.
+
+### Next Steps
+1. Investigate cmuxd — what does it do currently?
+2. Investigate ghostty surface lifecycle — can a surface be created and connected to an existing PTY?
+3. Decide on approach based on findings
