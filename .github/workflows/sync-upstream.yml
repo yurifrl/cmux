@@ -169,21 +169,19 @@ jobs:
       - name: Select Xcode
         run: |
           set -euo pipefail
-          if [ -d "/Applications/Xcode.app/Contents/Developer" ]; then
-            XCODE_DIR="/Applications/Xcode.app/Contents/Developer"
-          else
-            XCODE_APP="$(ls -d /Applications/Xcode*.app 2>/dev/null | head -n 1 || true)"
-            if [ -n "$XCODE_APP" ]; then
-              XCODE_DIR="$XCODE_APP/Contents/Developer"
-            else
-              echo "No Xcode.app found" >&2; exit 1
-            fi
+          XCODE_APP="$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort | tail -n 1 || true)"
+          if [ -z "$XCODE_APP" ]; then
+            XCODE_APP="/Applications/Xcode.app"
           fi
+          XCODE_DIR="$XCODE_APP/Contents/Developer"
+          if [ ! -d "$XCODE_DIR" ]; then
+            echo "No Xcode found under /Applications" >&2; exit 1
+          fi
+          echo "Selected: $XCODE_APP"
           echo "DEVELOPER_DIR=$XCODE_DIR" >> "$GITHUB_ENV"
+          export DEVELOPER_DIR="$XCODE_DIR"
           xcodebuild -version
-
-      - name: Install zig
-        run: brew install zig
+          xcrun --sdk macosx --show-sdk-path
 
       - name: Download pre-built GhosttyKit
         run: ./scripts/download-prebuilt-ghosttykit.sh
@@ -195,12 +193,29 @@ jobs:
           key: spm-${{ hashFiles('GhosttyTabs.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved') }}
           restore-keys: spm-
 
+      - name: Resolve packages
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            echo "Attempt $attempt..."
+            if xcodebuild -project GhosttyTabs.xcodeproj -scheme cmux -configuration Release \
+              -clonedSourcePackagesDirPath .spm-cache \
+              -resolvePackageDependencies; then
+              exit 0
+            fi
+            [ "$attempt" -eq 3 ] && exit 1
+            rm -rf .spm-cache
+            sleep 5
+          done
+
       - name: Build cmux
         id: build_result
         run: |
           set -euo pipefail
-          xcodebuild -scheme cmux -configuration Release -derivedDataPath build \
+          xcodebuild -project GhosttyTabs.xcodeproj -scheme cmux -configuration Release \
+            -derivedDataPath build \
             -clonedSourcePackagesDirPath .spm-cache \
+            -disableAutomaticPackageResolution \
             CODE_SIGNING_ALLOWED=NO build
           echo "status=success" >> "$GITHUB_OUTPUT"
 

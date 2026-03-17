@@ -8823,10 +8823,7 @@ private struct SuspendedWorkspaceSidebarSection: View {
                 .buttonStyle(.plain)
                 .foregroundStyle(.secondary)
                 .accessibilityIdentifier("SuspendedWorkspacesHeader")
-                .accessibilityLabel(String(
-                    localized: "sidebar.suspended.header.accessibilityLabel",
-                    defaultValue: "Suspended workspaces, \(store.entries.count) items"
-                ))
+                .accessibilityLabel("Suspended workspaces, \(store.entries.count) items")
 
                 if isExpanded {
                     LazyVStack(spacing: 1) {
@@ -8957,14 +8954,8 @@ private struct SuspendedWorkspaceRow: View {
             }
         }
         .accessibilityIdentifier("SuspendedWorkspaceRow-\(entry.id.uuidString)")
-        .accessibilityLabel(String(
-            localized: "sidebar.suspended.row.accessibilityLabel",
-            defaultValue: "Suspended workspace: \(entry.displayName)"
-        ))
-        .accessibilityHint(String(
-            localized: "sidebar.suspended.row.accessibilityHint",
-            defaultValue: "Click to restore"
-        ))
+        .accessibilityLabel(Text(verbatim: "Suspended workspace: " + entry.displayName))
+        .accessibilityHint(Text(verbatim: "Click to restore"))
     }
 }
 
