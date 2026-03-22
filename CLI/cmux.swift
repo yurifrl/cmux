@@ -1463,6 +1463,11 @@ struct CMUXCLI {
             return
         }
 
+        if command == "fork" {
+            try runFork(commandArgs: commandArgs)
+            return
+        }
+
         let client = SocketClient(path: resolvedSocketPath)
         if resolvedSocketPath != socketPath {
             cliTelemetry.breadcrumb(
@@ -5919,6 +5924,25 @@ struct CMUXCLI {
               cmux themes set --light "Catppuccin Latte" --dark "Catppuccin Mocha"
               cmux themes clear
             """
+        case "fork":
+            return """
+            Usage: cmux fork <subcommand>
+
+            Manage this cmux fork (yurifrl/cmux).
+
+            Subcommands:
+              update          Download and install the latest fork build from GitHub releases
+              update --check  Check for updates without installing
+              version         Show the current fork version
+              sync            Trigger an upstream sync via GitHub Actions (requires gh CLI)
+
+            Examples:
+              cmux fork update            # Download + install latest fork build
+              cmux fork update --check    # Just check if there's a newer version
+              cmux fork version           # Show current fork version
+              cmux fork sync              # Trigger upstream sync workflow
+              cmux fork sync --force      # Force sync even if up to date
+            """
         case "claude-teams":
             return String(localized: "cli.claude-teams.usage", defaultValue: """
             Usage: cmux claude-teams [claude-args...]
@@ -7190,6 +7214,292 @@ struct CMUXCLI {
 
         return Bundle.main.resourceURL?.appendingPathComponent("ghostty", isDirectory: true)
     }
+
+    // MARK: - Fork management
+
+    private static let forkGitHubOwner = "yurifrl"
+    private static let forkGitHubRepo = "cmux"
+    private static let forkReleasesAPI = "https://api.github.com/repos/\(forkGitHubOwner)/\(forkGitHubRepo)/releases"
+    private static let forkVersionFile = ".cmux-fork-version"
+
+    private func runFork(commandArgs: [String]) throws {
+        let subcommand = commandArgs.first?.lowercased() ?? "version"
+        let subArgs = commandArgs.dropFirst().map { $0 }
+
+        switch subcommand {
+        case "update":
+            if subArgs.contains("--check") {
+                try forkCheckForUpdate()
+            } else {
+                try forkUpdate()
+            }
+        case "version":
+            forkPrintVersion()
+        case "sync":
+            let force = subArgs.contains("--force")
+            try forkTriggerSync(force: force)
+        case "--help", "-h":
+            if let text = subcommandUsage("fork") {
+                print("cmux fork")
+                print("")
+                print(text)
+            }
+        default:
+            throw CLIError(message: "Unknown fork subcommand '\(subcommand)'. Run 'cmux fork --help' for usage.")
+        }
+    }
+
+    private func forkPrintVersion() {
+        if let version = forkVersionString() {
+            print("cmux fork \(version)")
+        } else {
+            let info = resolvedVersionInfo()
+            let upstreamVersion = info["CFBundleShortVersionString"] ?? "unknown"
+            print("cmux \(upstreamVersion) (no fork version — using upstream or dev build)")
+        }
+    }
+
+    /// Fetch the latest fork release from GitHub and compare with current.
+    private func forkCheckForUpdate() throws {
+        let currentVersion = forkVersionString()
+        let (latestTag, latestVersion, _) = try forkFetchLatestRelease()
+
+        if let currentVersion {
+            print("Current fork version: \(currentVersion)")
+        } else {
+            print("Current: upstream/dev build (no fork version)")
+        }
+        print("Latest fork release:  \(latestVersion) (\(latestTag))")
+
+        if currentVersion == latestVersion {
+            print("\n✅ You are up to date.")
+        } else {
+            print("\n⬆️  A newer fork version is available!")
+            print("Run 'cmux fork update' to install it.")
+        }
+    }
+
+    /// Download and install the latest fork release.
+    private func forkUpdate() throws {
+        let currentVersion = forkVersionString()
+        let (latestTag, latestVersion, downloadURL) = try forkFetchLatestRelease()
+
+        if let currentVersion {
+            print("Current: \(currentVersion)")
+        } else {
+            print("Current: upstream/dev build")
+        }
+        print("Latest:  \(latestVersion) (\(latestTag))")
+
+        if currentVersion == latestVersion {
+            print("\n✅ Already up to date.")
+            return
+        }
+
+        guard let downloadURL else {
+            throw CLIError(message: "No downloadable asset found in release \(latestTag)")
+        }
+
+        // Determine install location
+        let installPath = try forkInstallPath()
+        print("\nDownloading \(latestVersion) from \(downloadURL)...")
+        print("Installing to: \(installPath)")
+
+        // Download to temp
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("cmux-fork-update-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let tarPath = tempDir.appendingPathComponent("cmux-macos-unsigned.tar.gz")
+
+        // Download
+        let downloadProcess = Process()
+        downloadProcess.executableURL = URL(fileURLWithPath: "/usr/bin/curl")
+        downloadProcess.arguments = ["-fsSL", "-o", tarPath.path, downloadURL]
+        downloadProcess.standardError = FileHandle.standardError
+        try downloadProcess.run()
+        downloadProcess.waitUntilExit()
+        guard downloadProcess.terminationStatus == 0 else {
+            throw CLIError(message: "Download failed")
+        }
+
+        // Extract
+        let extractDir = tempDir.appendingPathComponent("extracted")
+        try FileManager.default.createDirectory(at: extractDir, withIntermediateDirectories: true)
+
+        let extractProcess = Process()
+        extractProcess.executableURL = URL(fileURLWithPath: "/usr/bin/tar")
+        extractProcess.arguments = ["xzf", tarPath.path, "-C", extractDir.path]
+        try extractProcess.run()
+        extractProcess.waitUntilExit()
+        guard extractProcess.terminationStatus == 0 else {
+            throw CLIError(message: "Extraction failed")
+        }
+
+        // Find the .app in the extracted directory
+        let extractedContents = try FileManager.default.contentsOfDirectory(at: extractDir, includingPropertiesForKeys: nil)
+        guard let appBundle = extractedContents.first(where: { $0.pathExtension == "app" }) else {
+            throw CLIError(message: "No .app bundle found in downloaded archive")
+        }
+
+        // Write fork version marker into the app bundle
+        let resourcesDir = appBundle.appendingPathComponent("Contents/Resources")
+        try? FileManager.default.createDirectory(at: resourcesDir, withIntermediateDirectories: true)
+        try latestVersion.write(to: resourcesDir.appendingPathComponent(Self.forkVersionFile), atomically: true, encoding: .utf8)
+
+        // Also write version marker next to the CLI binary
+        let macOSDir = appBundle.appendingPathComponent("Contents/MacOS")
+        if FileManager.default.fileExists(atPath: macOSDir.path) {
+            try? latestVersion.write(to: macOSDir.appendingPathComponent(Self.forkVersionFile), atomically: true, encoding: .utf8)
+        }
+
+        // Install: remove old, move new
+        let installURL = URL(fileURLWithPath: installPath)
+        if FileManager.default.fileExists(atPath: installPath) {
+            print("Removing existing installation...")
+            try FileManager.default.removeItem(at: installURL)
+        }
+
+        try FileManager.default.moveItem(at: appBundle, to: installURL)
+
+        print("\n✅ cmux fork \(latestVersion) installed to \(installPath)")
+        print("   Restart cmux or open the app to use the new version.")
+    }
+
+    /// Determine where to install the fork .app
+    private func forkInstallPath() throws -> String {
+        // Check if there's an existing cmux.app in /Applications
+        let systemPath = "/Applications/cmux.app"
+        let userPath = "\(NSHomeDirectory())/Applications/cmux.app"
+
+        if FileManager.default.fileExists(atPath: systemPath) {
+            // Check if we can write to it
+            if FileManager.default.isWritableFile(atPath: "/Applications/") {
+                return systemPath
+            }
+        }
+
+        if FileManager.default.fileExists(atPath: userPath) {
+            return userPath
+        }
+
+        // Default to ~/Applications
+        let userAppsDir = "\(NSHomeDirectory())/Applications"
+        try? FileManager.default.createDirectory(atPath: userAppsDir, withIntermediateDirectories: true)
+        return userPath
+    }
+
+    /// Fetch latest release info from GitHub.
+    /// Returns (tag, version string, download URL for tar.gz).
+    private func forkFetchLatestRelease() throws -> (String, String, String?) {
+        let pipe = Pipe()
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/curl")
+        process.arguments = [
+            "-fsSL",
+            "-H", "Accept: application/vnd.github+json",
+            "\(Self.forkReleasesAPI)?per_page=10"
+        ]
+        process.standardOutput = pipe
+        process.standardError = Pipe()
+        try process.run()
+        process.waitUntilExit()
+
+        guard process.terminationStatus == 0 else {
+            throw CLIError(message: "Failed to fetch releases from GitHub. Check your network connection.")
+        }
+
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        guard let releases = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]],
+              !releases.isEmpty else {
+            throw CLIError(message: "No releases found at \(Self.forkReleasesAPI)")
+        }
+
+        // Find the latest fork release (tag starts with "fork-v")
+        for release in releases {
+            guard let tag = release["tag_name"] as? String,
+                  tag.hasPrefix("fork-v") else { continue }
+
+            let version = String(tag.dropFirst("fork-v".count))
+
+            var downloadURL: String?
+            if let assets = release["assets"] as? [[String: Any]] {
+                for asset in assets {
+                    if let name = asset["name"] as? String,
+                       name.contains("cmux-macos"),
+                       name.hasSuffix(".tar.gz"),
+                       let url = asset["browser_download_url"] as? String {
+                        downloadURL = url
+                        break
+                    }
+                }
+            }
+
+            return (tag, version, downloadURL)
+        }
+
+        // Fallback: use any release with a tar.gz
+        if let first = releases.first,
+           let tag = first["tag_name"] as? String {
+            let version = tag.hasPrefix("v") ? String(tag.dropFirst()) : tag
+            var downloadURL: String?
+            if let assets = first["assets"] as? [[String: Any]] {
+                for asset in assets {
+                    if let name = asset["name"] as? String,
+                       name.hasSuffix(".tar.gz"),
+                       let url = asset["browser_download_url"] as? String {
+                        downloadURL = url
+                        break
+                    }
+                }
+            }
+            return (tag, version, downloadURL)
+        }
+
+        throw CLIError(message: "No fork releases found")
+    }
+
+    /// Trigger the sync-upstream workflow via gh CLI.
+    private func forkTriggerSync(force: Bool) throws {
+        // Check gh CLI is available
+        let whichProcess = Process()
+        whichProcess.executableURL = URL(fileURLWithPath: "/usr/bin/which")
+        whichProcess.arguments = ["gh"]
+        whichProcess.standardOutput = Pipe()
+        whichProcess.standardError = Pipe()
+        try whichProcess.run()
+        whichProcess.waitUntilExit()
+
+        guard whichProcess.terminationStatus == 0 else {
+            throw CLIError(message: "GitHub CLI (gh) not found. Install with: brew install gh")
+        }
+
+        var arguments = [
+            "workflow", "run", "sync-upstream.yml",
+            "--repo", "\(Self.forkGitHubOwner)/\(Self.forkGitHubRepo)"
+        ]
+        if force {
+            arguments += ["-f", "force=true"]
+        }
+
+        print("Triggering upstream sync\(force ? " (force)" : "")...")
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = ["gh"] + arguments
+        process.standardOutput = FileHandle.standardOutput
+        process.standardError = FileHandle.standardError
+        try process.run()
+        process.waitUntilExit()
+
+        guard process.terminationStatus == 0 else {
+            throw CLIError(message: "Failed to trigger workflow. Make sure you're authenticated: gh auth login")
+        }
+
+        print("✅ Sync workflow triggered. Check progress at:")
+        print("   https://github.com/\(Self.forkGitHubOwner)/\(Self.forkGitHubRepo)/actions/workflows/sync-upstream.yml")
+    }
+
+    // MARK: - End fork management
 
     private func runThemes(commandArgs: [String], jsonOutput: Bool) throws {
         if commandArgs.isEmpty {
@@ -10659,8 +10969,72 @@ struct CMUXCLI {
         } else {
             baseSummary = "cmux version unknown"
         }
-        guard let commit else { return baseSummary }
-        return "\(baseSummary) [\(commit)]"
+        var parts = [baseSummary]
+        if let forkVersion = forkVersionString() {
+            parts.append("fork:\(forkVersion)")
+        }
+        if let commit { parts.append("[\(commit)]") }
+        return parts.joined(separator: " ")
+    }
+
+    /// Returns the fork version string if this is a fork build.
+    /// Checks (in order): CMUX_FORK_VERSION env var, .cmux-fork-version file next to executable,
+    /// .cmux-fork-version in repo root.
+    private func forkVersionString() -> String? {
+        // 1. Environment variable (set by CI build)
+        if let envVersion = ProcessInfo.processInfo.environment["CMUX_FORK_VERSION"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !envVersion.isEmpty {
+            return envVersion
+        }
+
+        // 2. File next to the CLI executable
+        if let execURL = resolvedExecutableURL() {
+            let markerURL = execURL.deletingLastPathComponent().appendingPathComponent(".cmux-fork-version")
+            if let data = try? Data(contentsOf: markerURL),
+               let version = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !version.isEmpty {
+                return version
+            }
+        }
+
+        // 3. File in app bundle Resources
+        if let execURL = resolvedExecutableURL() {
+            var current = execURL.deletingLastPathComponent().standardizedFileURL
+            while true {
+                if current.pathExtension == "app" {
+                    let resourceMarker = current.appendingPathComponent("Contents/Resources/.cmux-fork-version")
+                    if let data = try? Data(contentsOf: resourceMarker),
+                       let version = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                       !version.isEmpty {
+                        return version
+                    }
+                }
+                guard let parent = parentSearchURL(for: current) else { break }
+                current = parent
+            }
+        }
+
+        // 4. Repo root .cmux-fork-version
+        if let execURL = resolvedExecutableURL() {
+            var current = execURL.deletingLastPathComponent().standardizedFileURL
+            while true {
+                let projectMarker = current.appendingPathComponent("GhosttyTabs.xcodeproj/project.pbxproj")
+                if FileManager.default.fileExists(atPath: projectMarker.path) {
+                    let repoMarker = current.appendingPathComponent(".cmux-fork-version")
+                    if let data = try? Data(contentsOf: repoMarker),
+                       let version = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                       !version.isEmpty {
+                        return version
+                    }
+                    break
+                }
+                guard let parent = parentSearchURL(for: current) else { break }
+                current = parent
+            }
+        }
+
+        return nil
     }
 
     private func printWelcome() {
@@ -11028,6 +11402,7 @@ struct CMUXCLI {
           feedback [--email <email> --body <text> [--image <path> ...]]
           themes [list|set|clear]
           claude-teams [claude-args...]
+          fork [update|update --check|version|sync|sync --force]
           ping
           version
           capabilities
