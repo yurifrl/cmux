@@ -8848,6 +8848,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             return true
         }
 
+        // Move tab left/right: Cmd+Ctrl+Shift+[ / Cmd+Ctrl+Shift+]
+        if matchShortcut(event: event, shortcut: KeyboardShortcutSettings.shortcut(for: .moveTabLeft)) {
+            tabManager?.moveCurrentTabLeft()
+            return true
+        }
+        if matchShortcut(event: event, shortcut: KeyboardShortcutSettings.shortcut(for: .moveTabRight)) {
+            tabManager?.moveCurrentTabRight()
+            return true
+        }
+
         if matchShortcut(event: event, shortcut: KeyboardShortcutSettings.shortcut(for: .toggleTerminalCopyMode)) {
             let handled = tabManager?.toggleFocusedTerminalCopyMode() ?? false
 #if DEBUG
@@ -8881,6 +8891,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             )
 #endif
             tabManager?.selectPreviousTab()
+            return true
+        }
+
+        // Move workspace up/down: Cmd+Ctrl+↑ / Cmd+Ctrl+↓
+        if matchShortcut(event: event, shortcut: KeyboardShortcutSettings.shortcut(for: .moveWorkspaceUp)) {
+            if let manager = tabManager,
+               let workspace = manager.selectedWorkspace,
+               let currentIndex = manager.tabs.firstIndex(where: { $0.id == workspace.id }),
+               currentIndex > 0 {
+                _ = manager.reorderWorkspace(tabId: workspace.id, toIndex: currentIndex - 1)
+                manager.selectWorkspace(workspace)
+            }
+            return true
+        }
+
+        if matchShortcut(event: event, shortcut: KeyboardShortcutSettings.shortcut(for: .moveWorkspaceDown)) {
+            if let manager = tabManager,
+               let workspace = manager.selectedWorkspace,
+               let currentIndex = manager.tabs.firstIndex(where: { $0.id == workspace.id }),
+               currentIndex < manager.tabs.count - 1 {
+                _ = manager.reorderWorkspace(tabId: workspace.id, toIndex: currentIndex + 1)
+                manager.selectWorkspace(workspace)
+            }
             return true
         }
 
