@@ -5528,6 +5528,30 @@ struct ContentView: View {
                 when: { $0.bool(CommandPaletteContextKeys.workspaceHasSplits) }
             )
         )
+        contributions.append(
+            CommandPaletteCommandContribution(
+                commandId: "palette.echo",
+                title: constant(String(localized: "command.echo.title", defaultValue: "Echo")),
+                subtitle: constant(String(localized: "command.echo.subtitle", defaultValue: "Utility")),
+                keywords: ["echo", "say", "repeat", "word"]
+            )
+        )
+        contributions.append(
+            CommandPaletteCommandContribution(
+                commandId: "palette.createWorkspaceFromFolder",
+                title: constant(String(localized: "command.createWorkspaceFromFolder.title", defaultValue: "Create Workspace from Folder…")),
+                subtitle: constant(String(localized: "command.createWorkspaceFromFolder.subtitle", defaultValue: "Workspace")),
+                keywords: ["create", "workspace", "folder", "directory", "project", "open", "browse"]
+            )
+        )
+        contributions.append(
+            CommandPaletteCommandContribution(
+                commandId: "palette.cws",
+                title: constant(String(localized: "command.cws.title", defaultValue: "New Workspace from Query (cws)…")),
+                subtitle: constant(String(localized: "command.cws.subtitle", defaultValue: "Workspace")),
+                keywords: ["cws", "create", "workspace", "zoxide", "project", "directory", "switch", "folder"]
+            )
+        )
 
         return contributions
     }
@@ -5870,6 +5894,188 @@ struct ContentView: View {
                 return
             }
         }
+        registry.register(commandId: "palette.echo") {
+            DispatchQueue.main.async {
+                let alert = NSAlert()
+                alert.messageText = String(localized: "alert.echo.title", defaultValue: "Echo")
+                alert.informativeText = String(localized: "alert.echo.message", defaultValue: "Enter a word to echo back.")
+                let input = NSTextField(string: "")
+                input.placeholderString = String(localized: "alert.echo.placeholder", defaultValue: "Type something…")
+                input.frame = NSRect(x: 0, y: 0, width: 240, height: 22)
+                alert.accessoryView = input
+                alert.addButton(withTitle: String(localized: "alert.echo.ok", defaultValue: "Echo"))
+                alert.addButton(withTitle: String(localized: "alert.echo.cancel", defaultValue: "Cancel"))
+                let alertWindow = alert.window
+                alertWindow.initialFirstResponder = input
+                DispatchQueue.main.async {
+                    alertWindow.makeFirstResponder(input)
+                    input.selectText(nil)
+                }
+                let response = alert.runModal()
+                guard response == .alertFirstButtonReturn else { return }
+                let word = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !word.isEmpty else { return }
+                let echoAlert = NSAlert()
+                echoAlert.messageText = String(localized: "alert.echo.result.title", defaultValue: "Echo")
+                echoAlert.informativeText = word
+                echoAlert.addButton(withTitle: String(localized: "alert.echo.result.ok", defaultValue: "OK"))
+                echoAlert.runModal()
+            }
+        }
+        registry.register(commandId: "palette.createWorkspaceFromFolder") {
+            DispatchQueue.main.async {
+                let panel = NSOpenPanel()
+                panel.canChooseFiles = false
+                panel.canChooseDirectories = true
+                panel.allowsMultipleSelection = false
+                panel.title = String(localized: "panel.createWorkspaceFromFolder.title", defaultValue: "Create Workspace from Folder")
+                panel.prompt = String(localized: "panel.createWorkspaceFromFolder.prompt", defaultValue: "Create")
+                guard panel.runModal() == .OK, let url = panel.url else { return }
+                let folderName = url.lastPathComponent
+                // If a workspace with this name already exists, switch to it.
+                if let existing = tabManager.tabs.first(where: {
+                    let custom = $0.customTitle?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                    return !custom.isEmpty && custom == folderName
+                }) {
+                    tabManager.selectedTabId = existing.id
+                    return
+                }
+                let workspace = tabManager.addWorkspace(workingDirectory: url.path)
+                tabManager.setCustomTitle(tabId: workspace.id, title: folderName)
+            }
+        }
+        registry.register(commandId: "palette.cws") {
+            DispatchQueue.main.async {
+                let alert = NSAlert()
+                alert.messageText = String(localized: "alert.cws.title", defaultValue: "New Workspace")
+                alert.informativeText = String(localized: "alert.cws.message", defaultValue: "Enter a project name or path to resolve via zoxide.")
+                let input = NSTextField(string: "")
+                input.placeholderString = String(localized: "alert.cws.placeholder", defaultValue: "e.g. cmux, dotfiles, myproject…")
+                input.frame = NSRect(x: 0, y: 0, width: 300, height: 22)
+                alert.accessoryView = input
+                alert.addButton(withTitle: String(localized: "alert.cws.create", defaultValue: "Create"))
+                alert.addButton(withTitle: String(localized: "alert.cws.cancel", defaultValue: "Cancel"))
+                let alertWindow = alert.window
+                alertWindow.initialFirstResponder = input
+                DispatchQueue.main.async {
+                    alertWindow.makeFirstResponder(input)
+                    input.selectText(nil)
+                }
+                let response = alert.runModal()
+                guard response == .alertFirstButtonReturn else { return }
+                let query = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !query.isEmpty else { return }
+
+                // Resolve directory via zoxide, then candidate search fallback.
+                let resolvedDir = Self.resolveDirectoryForCws(query: query)
+                guard let targetDir = resolvedDir else {
+                    let errAlert = NSAlert()
+                    errAlert.messageText = String(localized: "alert.cws.notFound.title", defaultValue: "Not Found")
+                    errAlert.informativeText = String(localized: "alert.cws.notFound.message", defaultValue: "No matching directory found for: \(query)")
+                    errAlert.alertStyle = .warning
+                    errAlert.addButton(withTitle: String(localized: "alert.cws.notFound.ok", defaultValue: "OK"))
+                    errAlert.runModal()
+                    return
+                }
+
+                let folderName = (targetDir as NSString).lastPathComponent
+                // If a workspace with this name already exists, switch to it.
+                if let existing = tabManager.tabs.first(where: {
+                    let custom = $0.customTitle?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                    return !custom.isEmpty && custom == folderName
+                }) {
+                    tabManager.selectedTabId = existing.id
+                    return
+                }
+                let workspace = tabManager.addWorkspace(workingDirectory: targetDir)
+                tabManager.setCustomTitle(tabId: workspace.id, title: folderName)
+            }
+        }
+    }
+
+    /// Resolve a query string to a directory path, mirroring the `cws` CLI behavior.
+    /// Tries zoxide first, then falls back to searching candidate directories under ~/Workdir.
+    private static func resolveDirectoryForCws(query: String) -> String? {
+        // 1. Try zoxide query
+        if let zoxidePath = Self.findExecutable("zoxide") {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: zoxidePath)
+            process.arguments = ["query", "--", query]
+            let pipe = Pipe()
+            process.standardOutput = pipe
+            process.standardError = FileHandle.nullDevice
+            do {
+                try process.run()
+                process.waitUntilExit()
+                if process.terminationStatus == 0 {
+                    let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                    let result = String(data: data, encoding: .utf8)?
+                        .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                    if !result.isEmpty && FileManager.default.fileExists(atPath: result) {
+                        return result
+                    }
+                }
+            } catch {}
+        }
+
+        // 2. Fallback: search candidate directories under ~/Workdir, ~/DotFiles, ~/Obsidian
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let candidateRoots = [
+            "\(home)/Workdir",
+            "\(home)/DotFiles",
+            "\(home)/Obsidian",
+        ]
+        let fm = FileManager.default
+        let queryLower = query.lowercased()
+        var exactNameMatches: [String] = []
+        var partialMatches: [String] = []
+
+        for root in candidateRoots {
+            guard fm.fileExists(atPath: root) else { continue }
+            guard let enumerator = fm.enumerator(
+                at: URL(fileURLWithPath: root),
+                includingPropertiesForKeys: [.isDirectoryKey],
+                options: [.skipsHiddenFiles]
+            ) else { continue }
+            while let url = enumerator.nextObject() as? URL {
+                // Limit depth to ~4 levels
+                let relComponents = url.pathComponents.count - URL(fileURLWithPath: root).pathComponents.count
+                if relComponents > 4 {
+                    enumerator.skipDescendants()
+                    continue
+                }
+                var isDir: ObjCBool = false
+                guard fm.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue else { continue }
+                // Skip .git directories
+                if url.lastPathComponent == ".git" {
+                    enumerator.skipDescendants()
+                    continue
+                }
+                let name = url.lastPathComponent.lowercased()
+                if name == queryLower {
+                    exactNameMatches.append(url.path)
+                } else if name.contains(queryLower) || url.path.lowercased().contains(queryLower) {
+                    partialMatches.append(url.path)
+                }
+            }
+        }
+
+        if exactNameMatches.count == 1 { return exactNameMatches[0] }
+        if !exactNameMatches.isEmpty { return exactNameMatches[0] }
+        if partialMatches.count == 1 { return partialMatches[0] }
+        if !partialMatches.isEmpty { return partialMatches[0] }
+
+        return nil
+    }
+
+    /// Find an executable by name, searching common Homebrew and system paths.
+    private static func findExecutable(_ name: String) -> String? {
+        let candidates = [
+            "/opt/homebrew/bin/\(name)",
+            "/usr/local/bin/\(name)",
+            "/usr/bin/\(name)",
+        ]
+        return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
     }
 
     private var focusedPanelContext: (workspace: Workspace, panelId: UUID, panel: any Panel)? {
