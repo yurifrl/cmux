@@ -2874,6 +2874,16 @@ class TabManager: ObservableObject {
         selectedWorkspace?.selectPreviousSurface()
     }
 
+    /// Move the active tab one position left in the focused pane's tab bar
+    func moveCurrentTabLeft() {
+        selectedWorkspace?.moveCurrentTabLeft()
+    }
+
+    /// Move the active tab one position right in the focused pane's tab bar
+    func moveCurrentTabRight() {
+        selectedWorkspace?.moveCurrentTabRight()
+    }
+
     /// Select a surface by index in the currently focused pane of the selected workspace
     func selectSurface(at index: Int) {
         selectedWorkspace?.selectSurface(at: index)

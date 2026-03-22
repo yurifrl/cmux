@@ -7693,6 +7693,26 @@ final class Workspace: Identifiable, ObservableObject {
         }
     }
 
+    /// Move the active tab one position to the left in the focused pane's tab bar
+    func moveCurrentTabLeft() {
+        guard let paneId = bonsplitController.focusedPaneId,
+              let currentTab = bonsplitController.selectedTab(inPane: paneId) else { return }
+        let tabs = bonsplitController.tabs(inPane: paneId)
+        guard let currentIndex = tabs.firstIndex(where: { $0.id == currentTab.id }),
+              currentIndex > 0 else { return }
+        bonsplitController.reorderTab(currentTab.id, toIndex: currentIndex - 1)
+    }
+
+    /// Move the active tab one position to the right in the focused pane's tab bar
+    func moveCurrentTabRight() {
+        guard let paneId = bonsplitController.focusedPaneId,
+              let currentTab = bonsplitController.selectedTab(inPane: paneId) else { return }
+        let tabs = bonsplitController.tabs(inPane: paneId)
+        guard let currentIndex = tabs.firstIndex(where: { $0.id == currentTab.id }),
+              currentIndex < tabs.count - 1 else { return }
+        bonsplitController.reorderTab(currentTab.id, toIndex: currentIndex + 2)
+    }
+
     /// Select a surface by index in the currently focused pane
     func selectSurface(at index: Int) {
         guard let focusedPaneId = bonsplitController.focusedPaneId else { return }

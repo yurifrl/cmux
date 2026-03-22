@@ -25,8 +25,12 @@ struct cmuxApp: App {
     @AppStorage(KeyboardShortcutSettings.Action.jumpToUnread.defaultsKey) private var jumpToUnreadShortcutData = Data()
     @AppStorage(KeyboardShortcutSettings.Action.nextSurface.defaultsKey) private var nextSurfaceShortcutData = Data()
     @AppStorage(KeyboardShortcutSettings.Action.prevSurface.defaultsKey) private var prevSurfaceShortcutData = Data()
+    @AppStorage(KeyboardShortcutSettings.Action.moveTabLeft.defaultsKey) private var moveTabLeftShortcutData = Data()
+    @AppStorage(KeyboardShortcutSettings.Action.moveTabRight.defaultsKey) private var moveTabRightShortcutData = Data()
     @AppStorage(KeyboardShortcutSettings.Action.nextSidebarTab.defaultsKey) private var nextWorkspaceShortcutData = Data()
     @AppStorage(KeyboardShortcutSettings.Action.prevSidebarTab.defaultsKey) private var prevWorkspaceShortcutData = Data()
+    @AppStorage(KeyboardShortcutSettings.Action.moveWorkspaceUp.defaultsKey) private var moveWorkspaceUpShortcutData = Data()
+    @AppStorage(KeyboardShortcutSettings.Action.moveWorkspaceDown.defaultsKey) private var moveWorkspaceDownShortcutData = Data()
     @AppStorage(KeyboardShortcutSettings.Action.splitRight.defaultsKey) private var splitRightShortcutData = Data()
     @AppStorage(KeyboardShortcutSettings.Action.splitDown.defaultsKey) private var splitDownShortcutData = Data()
     @AppStorage(KeyboardShortcutSettings.Action.toggleBrowserDeveloperTools.defaultsKey)
@@ -541,6 +545,14 @@ struct cmuxApp: App {
                     activeTabManager.selectPreviousSurface()
                 }
 
+                splitCommandButton(title: String(localized: "menu.view.moveTabLeft", defaultValue: "Move Tab Left"), shortcut: moveTabLeftMenuShortcut) {
+                    activeTabManager.moveCurrentTabLeft()
+                }
+
+                splitCommandButton(title: String(localized: "menu.view.moveTabRight", defaultValue: "Move Tab Right"), shortcut: moveTabRightMenuShortcut) {
+                    activeTabManager.moveCurrentTabRight()
+                }
+
                 Button(String(localized: "menu.view.back", defaultValue: "Back")) {
                     activeTabManager.focusedBrowserPanel?.goBack()
                 }
@@ -599,6 +611,14 @@ struct cmuxApp: App {
 
                 splitCommandButton(title: String(localized: "menu.view.previousWorkspace", defaultValue: "Previous Workspace"), shortcut: prevWorkspaceMenuShortcut) {
                     activeTabManager.selectPreviousTab()
+                }
+
+                splitCommandButton(title: String(localized: "menu.view.moveWorkspaceUp", defaultValue: "Move Workspace Up"), shortcut: moveWorkspaceUpMenuShortcut) {
+                    moveSelectedWorkspace(in: activeTabManager, by: -1)
+                }
+
+                splitCommandButton(title: String(localized: "menu.view.moveWorkspaceDown", defaultValue: "Move Workspace Down"), shortcut: moveWorkspaceDownMenuShortcut) {
+                    moveSelectedWorkspace(in: activeTabManager, by: 1)
                 }
 
                 splitCommandButton(title: String(localized: "menu.view.renameWorkspace", defaultValue: "Rename Workspace…"), shortcut: renameWorkspaceMenuShortcut) {
@@ -733,6 +753,14 @@ struct cmuxApp: App {
         decodeShortcut(from: prevSurfaceShortcutData, fallback: KeyboardShortcutSettings.Action.prevSurface.defaultShortcut)
     }
 
+    private var moveTabLeftMenuShortcut: StoredShortcut {
+        decodeShortcut(from: moveTabLeftShortcutData, fallback: KeyboardShortcutSettings.Action.moveTabLeft.defaultShortcut)
+    }
+
+    private var moveTabRightMenuShortcut: StoredShortcut {
+        decodeShortcut(from: moveTabRightShortcutData, fallback: KeyboardShortcutSettings.Action.moveTabRight.defaultShortcut)
+    }
+
     private var nextWorkspaceMenuShortcut: StoredShortcut {
         decodeShortcut(
             from: nextWorkspaceShortcutData,
@@ -745,6 +773,14 @@ struct cmuxApp: App {
             from: prevWorkspaceShortcutData,
             fallback: KeyboardShortcutSettings.Action.prevSidebarTab.defaultShortcut
         )
+    }
+
+    private var moveWorkspaceUpMenuShortcut: StoredShortcut {
+        decodeShortcut(from: moveWorkspaceUpShortcutData, fallback: KeyboardShortcutSettings.Action.moveWorkspaceUp.defaultShortcut)
+    }
+
+    private var moveWorkspaceDownMenuShortcut: StoredShortcut {
+        decodeShortcut(from: moveWorkspaceDownShortcutData, fallback: KeyboardShortcutSettings.Action.moveWorkspaceDown.defaultShortcut)
     }
 
     private var splitDownMenuShortcut: StoredShortcut {

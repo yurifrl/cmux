@@ -18,8 +18,12 @@ enum KeyboardShortcutSettings {
         // Navigation
         case nextSurface
         case prevSurface
+        case moveTabLeft
+        case moveTabRight
         case nextSidebarTab
         case prevSidebarTab
+        case moveWorkspaceUp
+        case moveWorkspaceDown
         case renameTab
         case renameWorkspace
         case closeWorkspace
@@ -58,8 +62,12 @@ enum KeyboardShortcutSettings {
             case .triggerFlash: return String(localized: "shortcut.flashFocusedPanel.label", defaultValue: "Flash Focused Panel")
             case .nextSurface: return String(localized: "shortcut.nextSurface.label", defaultValue: "Next Surface")
             case .prevSurface: return String(localized: "shortcut.previousSurface.label", defaultValue: "Previous Surface")
+            case .moveTabLeft: return String(localized: "shortcut.moveTabLeft.label", defaultValue: "Move Tab Left")
+            case .moveTabRight: return String(localized: "shortcut.moveTabRight.label", defaultValue: "Move Tab Right")
             case .nextSidebarTab: return String(localized: "shortcut.nextWorkspace.label", defaultValue: "Next Workspace")
             case .prevSidebarTab: return String(localized: "shortcut.previousWorkspace.label", defaultValue: "Previous Workspace")
+            case .moveWorkspaceUp: return String(localized: "shortcut.moveWorkspaceUp.label", defaultValue: "Move Workspace Up")
+            case .moveWorkspaceDown: return String(localized: "shortcut.moveWorkspaceDown.label", defaultValue: "Move Workspace Down")
             case .renameTab: return String(localized: "shortcut.renameTab.label", defaultValue: "Rename Tab")
             case .renameWorkspace: return String(localized: "shortcut.renameWorkspace.label", defaultValue: "Rename Workspace")
             case .closeWorkspace: return String(localized: "shortcut.closeWorkspace.label", defaultValue: "Close Workspace")
@@ -94,6 +102,8 @@ enum KeyboardShortcutSettings {
             case .triggerFlash: return "shortcut.triggerFlash"
             case .nextSidebarTab: return "shortcut.nextSidebarTab"
             case .prevSidebarTab: return "shortcut.prevSidebarTab"
+            case .moveWorkspaceUp: return "shortcut.moveWorkspaceUp"
+            case .moveWorkspaceDown: return "shortcut.moveWorkspaceDown"
             case .renameTab: return "shortcut.renameTab"
             case .renameWorkspace: return "shortcut.renameWorkspace"
             case .closeWorkspace: return "shortcut.closeWorkspace"
@@ -109,6 +119,8 @@ enum KeyboardShortcutSettings {
             case .splitBrowserDown: return "shortcut.splitBrowserDown"
             case .nextSurface: return "shortcut.nextSurface"
             case .prevSurface: return "shortcut.prevSurface"
+            case .moveTabLeft: return "shortcut.moveTabLeft"
+            case .moveTabRight: return "shortcut.moveTabRight"
             case .newSurface: return "shortcut.newSurface"
             case .toggleTerminalCopyMode: return "shortcut.toggleTerminalCopyMode"
             case .openBrowser: return "shortcut.openBrowser"
@@ -141,6 +153,10 @@ enum KeyboardShortcutSettings {
                 return StoredShortcut(key: "]", command: true, shift: false, option: false, control: true)
             case .prevSidebarTab:
                 return StoredShortcut(key: "[", command: true, shift: false, option: false, control: true)
+            case .moveWorkspaceUp:
+                return StoredShortcut(key: "↑", command: true, shift: false, option: false, control: true)
+            case .moveWorkspaceDown:
+                return StoredShortcut(key: "↓", command: true, shift: false, option: false, control: true)
             case .renameTab:
                 return StoredShortcut(key: "r", command: true, shift: false, option: false, control: false)
             case .renameWorkspace:
@@ -171,6 +187,10 @@ enum KeyboardShortcutSettings {
                 return StoredShortcut(key: "]", command: true, shift: true, option: false, control: false)
             case .prevSurface:
                 return StoredShortcut(key: "[", command: true, shift: true, option: false, control: false)
+            case .moveTabLeft:
+                return StoredShortcut(key: "[", command: true, shift: true, option: false, control: true)
+            case .moveTabRight:
+                return StoredShortcut(key: "]", command: true, shift: true, option: false, control: true)
             case .newSurface:
                 return StoredShortcut(key: "t", command: true, shift: false, option: false, control: false)
             case .toggleTerminalCopyMode:
@@ -235,6 +255,8 @@ enum KeyboardShortcutSettings {
 
     static func nextSidebarTabShortcut() -> StoredShortcut { shortcut(for: .nextSidebarTab) }
     static func prevSidebarTabShortcut() -> StoredShortcut { shortcut(for: .prevSidebarTab) }
+    static func moveWorkspaceUpShortcut() -> StoredShortcut { shortcut(for: .moveWorkspaceUp) }
+    static func moveWorkspaceDownShortcut() -> StoredShortcut { shortcut(for: .moveWorkspaceDown) }
     static func renameWorkspaceShortcut() -> StoredShortcut { shortcut(for: .renameWorkspace) }
     static func closeWorkspaceShortcut() -> StoredShortcut { shortcut(for: .closeWorkspace) }
     static func suspendWorkspaceShortcut() -> StoredShortcut { shortcut(for: .suspendWorkspace) }
@@ -252,6 +274,8 @@ enum KeyboardShortcutSettings {
 
     static func nextSurfaceShortcut() -> StoredShortcut { shortcut(for: .nextSurface) }
     static func prevSurfaceShortcut() -> StoredShortcut { shortcut(for: .prevSurface) }
+    static func moveTabLeftShortcut() -> StoredShortcut { shortcut(for: .moveTabLeft) }
+    static func moveTabRightShortcut() -> StoredShortcut { shortcut(for: .moveTabRight) }
     static func newSurfaceShortcut() -> StoredShortcut { shortcut(for: .newSurface) }
 
     static func openBrowserShortcut() -> StoredShortcut { shortcut(for: .openBrowser) }
