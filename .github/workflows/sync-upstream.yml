@@ -2,11 +2,18 @@ name: Sync Upstream
 
 on:
   schedule:
-    - cron: '0 6 * * *'
+    - cron: '0 6 * * *'  # Daily at 6am UTC
   workflow_dispatch:
+    inputs:
+      force:
+        description: 'Force sync even if already up to date (rebuild + release)'
+        required: false
+        default: 'false'
+        type: boolean
 
 permissions:
   contents: write
+  pull-requests: write
 
 jobs:
   sync:
@@ -16,6 +23,10 @@ jobs:
       sync_method: ${{ steps.result.outputs.method }}
       changelog: ${{ steps.changelog.outputs.log }}
       has_changes: ${{ steps.changelog.outputs.has_changes }}
+      pr_number: ${{ steps.open_pr.outputs.pr_number }}
+      pr_url: ${{ steps.open_pr.outputs.pr_url }}
+      branch: ${{ steps.branch.outputs.name }}
+      fork_version: ${{ steps.version.outputs.fork_version }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -27,7 +38,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git remote add upstream https://github.com/manaflow-ai/cmux.git
+          git remote add upstream https://github.com/manaflow-ai/cmux.git || true
           git fetch upstream main
 
       - name: Check for changes
@@ -35,88 +46,111 @@ jobs:
         run: |
           BEHIND=$(git rev-list --count HEAD..upstream/main)
           echo "behind=$BEHIND" >> "$GITHUB_OUTPUT"
-          if [ "$BEHIND" -eq 0 ]; then
-            echo "Already up to date"
+          FORCE="${{ github.event.inputs.force || 'false' }}"
+          echo "force=$FORCE" >> "$GITHUB_OUTPUT"
+          if [ "$BEHIND" -eq 0 ] && [ "$FORCE" != "true" ]; then
+            echo "Already up to date and no force flag"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
           else
-            echo "$BEHIND commits behind upstream"
+            echo "$BEHIND commits behind upstream (force=$FORCE)"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Create sync branch
+        id: branch
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          BRANCH="sync/upstream-$(date -u +%Y%m%d-%H%M%S)"
+          echo "name=$BRANCH" >> "$GITHUB_OUTPUT"
+          git checkout -b "$BRANCH"
 
       - name: Build changelog
         id: changelog
-        if: steps.check.outputs.behind != '0'
+        if: steps.check.outputs.skip != 'true'
         run: |
-          LOG=$(git log --oneline --no-merges HEAD..upstream/main | head -50)
-          COUNT=$(git rev-list --count HEAD..upstream/main)
+          if [ "${{ steps.check.outputs.behind }}" -eq 0 ]; then
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+            echo "log=Force rebuild (no upstream changes)" >> "$GITHUB_OUTPUT"
+            echo "count=0" >> "$GITHUB_OUTPUT"
+          else
+            LOG=$(git log --oneline --no-merges HEAD..upstream/main | head -50)
+            COUNT=$(git rev-list --count HEAD..upstream/main)
 
-          {
-            echo "log<<CHANGELOG_EOF"
-            echo "$LOG"
-            echo "CHANGELOG_EOF"
-          } >> "$GITHUB_OUTPUT"
-          echo "has_changes=true" >> "$GITHUB_OUTPUT"
-          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+            {
+              echo "log<<CHANGELOG_EOF"
+              echo "$LOG"
+              echo "CHANGELOG_EOF"
+            } >> "$GITHUB_OUTPUT"
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+            echo "count=$COUNT" >> "$GITHUB_OUTPUT"
 
-          DATESTAMP=$(date -u +"%Y-%m-%d %H:%M UTC")
-          {
-            echo "## Sync $DATESTAMP — $COUNT commits from upstream"
-            echo ""
-            echo "$LOG" | sed 's/^/- /'
-            echo ""
-          } > /tmp/sync-entry.md
+            DATESTAMP=$(date -u +"%Y-%m-%d %H:%M UTC")
+            {
+              echo "## Sync $DATESTAMP — $COUNT commits from upstream"
+              echo ""
+              echo "$LOG" | sed 's/^/- /'
+              echo ""
+            } > /tmp/sync-entry.md
+          fi
 
-      # --- Merge strategies ---
+      # --- Merge strategies (only when there are actual changes) ---
 
       - name: Try fast-forward
         id: ff
-        if: steps.check.outputs.behind != '0'
+        if: steps.check.outputs.skip != 'true' && steps.changelog.outputs.has_changes == 'true'
         continue-on-error: true
         run: git merge --ff-only upstream/main
 
       - name: Try merge favoring ours
         id: merge_ours
-        if: steps.check.outputs.behind != '0' && steps.ff.outcome == 'failure'
+        if: steps.check.outputs.skip != 'true' && steps.changelog.outputs.has_changes == 'true' && steps.ff.outcome == 'failure'
         continue-on-error: true
         run: |
           git reset --hard origin/main
+          git checkout -B "${{ steps.branch.outputs.name }}"
           git merge -X ours upstream/main -m "sync: merge upstream (favor ours)"
 
       - name: Claude Code resolve conflicts
         id: claude
-        if: steps.check.outputs.behind != '0' && steps.ff.outcome == 'failure' && steps.merge_ours.outcome == 'failure'
+        if: steps.check.outputs.skip != 'true' && steps.changelog.outputs.has_changes == 'true' && steps.ff.outcome == 'failure' && steps.merge_ours.outcome == 'failure'
         continue-on-error: true
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
           npm install -g @anthropic-ai/claude-code
           git reset --hard origin/main
+          git checkout -B "${{ steps.branch.outputs.name }}"
           git merge upstream/main --no-commit || true
           claude -p "You are resolving git merge conflicts in this repo.
           Rules:
           1. FAVOR our changes (HEAD) over upstream when intent conflicts
           2. Accept upstream changes that don't conflict with our modifications
-          3. Run any available tests/build to verify the resolution works
+          3. Preserve all our custom additions (fork commands, version info, workflow files)
           4. Stage and commit resolved files
           Steps:
           1. List conflicted files with: git diff --name-only --diff-filter=U
           2. For each file, understand BOTH sides and resolve intelligently
-          3. Run build/tests if available to verify nothing is broken
-          4. git add and git commit -m 'sync: claude-resolved merge (favoring ours)'"
+          3. git add and git commit -m 'sync: claude-resolved merge (favoring ours)'"
 
-      # Restore our workflow files so GITHUB_TOKEN can push
+      # Always preserve our workflow files and fork customizations
       - name: Restore our workflow files
-        if: steps.check.outputs.behind != '0'
+        if: steps.check.outputs.skip != 'true' && steps.changelog.outputs.has_changes == 'true'
         run: |
           git checkout origin/main -- .github/workflows/ 2>/dev/null || true
-          if ! git diff --cached --quiet .github/workflows/; then
+          if ! git diff --cached --quiet .github/workflows/ 2>/dev/null; then
             git commit --amend --no-edit
           fi
 
       - name: Set result
         id: result
         run: |
-          if [ "${{ steps.check.outputs.behind }}" = "0" ]; then
+          if [ "${{ steps.check.outputs.skip }}" = "true" ]; then
             echo "status=up-to-date" >> "$GITHUB_OUTPUT"
             echo "method=none" >> "$GITHUB_OUTPUT"
+          elif [ "${{ steps.changelog.outputs.has_changes }}" != "true" ]; then
+            # Force rebuild with no upstream changes
+            echo "status=success" >> "$GITHUB_OUTPUT"
+            echo "method=force-rebuild" >> "$GITHUB_OUTPUT"
           elif [ "${{ steps.ff.outcome }}" = "success" ]; then
             echo "status=success" >> "$GITHUB_OUTPUT"
             echo "method=fast-forward" >> "$GITHUB_OUTPUT"
@@ -131,8 +165,25 @@ jobs:
             echo "method=none" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Update SYNC_CHANGELOG.md
+      # Compute fork version: upstream version + fork build number
+      - name: Compute fork version
+        id: version
         if: steps.result.outputs.status == 'success'
+        run: |
+          # Get upstream MARKETING_VERSION
+          UPSTREAM_VERSION=$(grep -m1 'MARKETING_VERSION = ' GhosttyTabs.xcodeproj/project.pbxproj | sed 's/.*= \(.*\);/\1/')
+
+          # Count total fork-specific commits (our commits not in upstream)
+          FORK_COMMITS=$(git rev-list --count upstream/main..HEAD 2>/dev/null || echo "1")
+
+          # Fork version = upstream version + "-fork.N"
+          FORK_VERSION="${UPSTREAM_VERSION}-fork.${FORK_COMMITS}"
+          echo "fork_version=$FORK_VERSION" >> "$GITHUB_OUTPUT"
+          echo "upstream_version=$UPSTREAM_VERSION" >> "$GITHUB_OUTPUT"
+          echo "Fork version: $FORK_VERSION"
+
+      - name: Update SYNC_CHANGELOG.md
+        if: steps.result.outputs.status == 'success' && steps.changelog.outputs.has_changes == 'true'
         run: |
           if [ -f SYNC_CHANGELOG.md ]; then
             cat /tmp/sync-entry.md SYNC_CHANGELOG.md > /tmp/merged-changelog.md
@@ -143,23 +194,75 @@ jobs:
           git add SYNC_CHANGELOG.md
           git commit --amend --no-edit || git commit -m "sync: update changelog"
 
-      - name: Push
+      - name: Push branch
         if: steps.result.outputs.status == 'success'
-        run: git push origin main
+        run: |
+          BRANCH="${{ steps.branch.outputs.name }}"
+          if [ -z "$BRANCH" ]; then
+            # Force rebuild case - create a branch for the PR
+            BRANCH="sync/force-rebuild-$(date -u +%Y%m%d-%H%M%S)"
+            git checkout -b "$BRANCH"
+            git commit --allow-empty -m "sync: force rebuild ${{ steps.version.outputs.fork_version }}"
+          fi
+          git push origin "$BRANCH"
+
+      - name: Open PR
+        id: open_pr
+        if: steps.result.outputs.status == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH="${{ steps.branch.outputs.name }}"
+          if [ -z "$BRANCH" ]; then
+            BRANCH="sync/force-rebuild-$(date -u +%Y%m%d-%H%M%S)"
+          fi
+          METHOD="${{ steps.result.outputs.method }}"
+          FORK_VERSION="${{ steps.version.outputs.fork_version }}"
+          CHANGELOG="${{ steps.changelog.outputs.log }}"
+          COUNT="${{ steps.changelog.outputs.count }}"
+
+          BODY="## Upstream Sync — ${FORK_VERSION}
+
+          **Method:** ${METHOD}
+          **Upstream commits:** ${COUNT}
+
+          ### Changes from upstream
+          \`\`\`
+          ${CHANGELOG}
+          \`\`\`
+
+          ---
+          *Auto-generated by sync-upstream workflow. Build will be attached as a release once merged or can be downloaded from the workflow artifacts.*"
+
+          PR_URL=$(gh pr create \
+            --base main \
+            --head "$BRANCH" \
+            --title "sync: upstream ${FORK_VERSION} (${METHOD})" \
+            --body "$BODY" \
+            --label "sync" 2>&1 || true)
+
+          if echo "$PR_URL" | grep -q "https://"; then
+            PR_NUMBER=$(echo "$PR_URL" | grep -oE '[0-9]+$')
+            echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+            echo "pr_url=$PR_URL" >> "$GITHUB_OUTPUT"
+            echo "Opened PR: $PR_URL"
+          else
+            echo "PR creation failed or already exists: $PR_URL"
+            echo "pr_number=" >> "$GITHUB_OUTPUT"
+            echo "pr_url=" >> "$GITHUB_OUTPUT"
+          fi
 
   # --- Build ---
 
   build:
     needs: sync
-    if: |
-      (needs.sync.outputs.has_changes == 'true' && needs.sync.outputs.sync_status == 'success') ||
-      (github.event_name == 'workflow_dispatch' && needs.sync.outputs.sync_status != 'failed')
+    if: needs.sync.outputs.sync_status == 'success'
     runs-on: macos-15
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: main
+          ref: ${{ needs.sync.outputs.branch }}
           submodules: recursive
 
       - name: Select Xcode
@@ -208,30 +311,79 @@ jobs:
 
       - name: Build cmux
         id: build_result
+        env:
+          FORK_VERSION: ${{ needs.sync.outputs.fork_version }}
         run: |
           set -euo pipefail
           xcodebuild -project GhosttyTabs.xcodeproj -scheme cmux -configuration Release \
             -derivedDataPath build \
             -clonedSourcePackagesDirPath .spm-cache \
             -disableAutomaticPackageResolution \
-            CODE_SIGNING_ALLOWED=NO build
+            CODE_SIGNING_ALLOWED=NO \
+            CMUX_FORK_VERSION="$FORK_VERSION" \
+            build
           echo "status=success" >> "$GITHUB_OUTPUT"
 
-      - name: Package and release
+      - name: Package app
+        if: steps.build_result.outputs.status == 'success'
+        env:
+          FORK_VERSION: ${{ needs.sync.outputs.fork_version }}
+        run: |
+          APP_PATH="build/Build/Products/Release/cmux.app"
+          if [ ! -d "$APP_PATH" ]; then
+            echo "App not found at $APP_PATH" >&2
+            ls -la build/Build/Products/Release/ || true
+            exit 1
+          fi
+          # Write fork version marker into the app bundle
+          ./scripts/write-fork-version.sh "$APP_PATH" "$FORK_VERSION"
+          # Create tar.gz
+          tar czf cmux-macos-unsigned.tar.gz -C "$(dirname "$APP_PATH")" "$(basename "$APP_PATH")"
+          echo "Packaged: cmux-macos-unsigned.tar.gz"
+          ls -lh cmux-macos-unsigned.tar.gz
+
+      - name: Create release
         if: steps.build_result.outputs.status == 'success'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FORK_VERSION: ${{ needs.sync.outputs.fork_version }}
         run: |
-          APP_PATH="build/Build/Products/Release/cmux.app"
-          tar czf cmux-macos-unsigned.tar.gz -C "$(dirname "$APP_PATH")" "$(basename "$APP_PATH")"
-          TAG="sync-$(date -u +%Y%m%d-%H%M%S)"
+          TAG="fork-v${FORK_VERSION}"
+
+          # Delete existing release/tag if it exists (force rebuild case)
+          gh release delete "$TAG" --yes 2>/dev/null || true
+          git tag -d "$TAG" 2>/dev/null || true
+          git push origin ":refs/tags/$TAG" 2>/dev/null || true
+
           gh release create "$TAG" \
             cmux-macos-unsigned.tar.gz \
-            --title "Sync build $TAG" \
-            --notes "Auto-built from upstream sync. Unsigned — for personal use." \
+            --title "cmux fork ${FORK_VERSION}" \
+            --notes "## cmux fork ${FORK_VERSION}
+
+          Auto-built from upstream sync.
+
+          **Install:**
+          \`\`\`bash
+          cmux fork update
+          \`\`\`
+
+          Or manually:
+          \`\`\`bash
+          curl -fsSL https://github.com/yurifrl/cmux/releases/download/${TAG}/cmux-macos-unsigned.tar.gz | tar xz -C /Applications/
+          \`\`\`
+
+          Unsigned — for personal use." \
             --prerelease
 
-  # --- Discord ---
+      - name: Upload artifact
+        if: steps.build_result.outputs.status == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: cmux-macos-unsigned
+          path: cmux-macos-unsigned.tar.gz
+          retention-days: 30
+
+  # --- Notify ---
 
   notify:
     runs-on: ubuntu-latest
@@ -247,7 +399,10 @@ jobs:
           REPO: ${{ github.repository }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           RELEASE_URL: ${{ github.server_url }}/${{ github.repository }}/releases
+          PR_URL: ${{ needs.sync.outputs.pr_url }}
+          FORK_VERSION: ${{ needs.sync.outputs.fork_version }}
         run: |
+          [ -z "${DISCORD_WEBHOOK:-}" ] && exit 0
           LOG=$(echo "$CHANGELOG" | head -30)
           [ ${#LOG} -gt 1000 ] && LOG="${LOG:0:1000}..."
           curl -s -H "Content-Type: application/json" \
@@ -257,14 +412,17 @@ jobs:
               --arg repo "$REPO" \
               --arg url "$RUN_URL" \
               --arg release "$RELEASE_URL" \
+              --arg pr "${PR_URL:-}" \
+              --arg version "${FORK_VERSION:-}" \
               '{
                 embeds: [{
-                  title: "✅ Fork synced + built",
+                  title: ("✅ Fork synced + built — " + $version),
                   description: ("**" + $repo + "** synced via **" + $method + "** and built successfully"),
                   color: 5025616,
                   fields: [
                     { name: "Changes from upstream", value: ("```\n" + $changelog + "\n```"), inline: false },
                     { name: "Download", value: ("[Latest release](" + $release + ")"), inline: true },
+                    { name: "PR", value: (if $pr != "" then ("[Review PR](" + $pr + ")") else "N/A" end), inline: true },
                     { name: "Action run", value: ("[View logs](" + $url + ")"), inline: true }
                   ]
                 }]
@@ -279,6 +437,7 @@ jobs:
           REPO: ${{ github.repository }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
+          [ -z "${DISCORD_WEBHOOK:-}" ] && exit 0
           LOG=$(echo "$CHANGELOG" | head -30)
           [ ${#LOG} -gt 1000 ] && LOG="${LOG:0:1000}..."
           curl -s -H "Content-Type: application/json" \
@@ -307,6 +466,7 @@ jobs:
           REPO: ${{ github.repository }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
+          [ -z "${DISCORD_WEBHOOK:-}" ] && exit 0
           LOG=$(echo "$CHANGELOG" | head -30)
           [ ${#LOG} -gt 1000 ] && LOG="${LOG:0:1000}..."
           curl -s -H "Content-Type: application/json" \
