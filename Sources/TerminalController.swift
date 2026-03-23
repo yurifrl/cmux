@@ -387,10 +387,42 @@ class TerminalController {
         number: Int,
         label: String,
         url: URL,
-        status: SidebarPullRequestStatus
+        status: SidebarPullRequestStatus,
+        branch: String?,
+        checks: SidebarPullRequestChecksStatus?
     ) -> Bool {
         guard let current else { return true }
-        return current.number != number || current.label != label || current.url != url || current.status != status
+        let normalizedBranch = branch?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let effectiveBranch: String? = {
+            if let normalizedBranch, !normalizedBranch.isEmpty {
+                return normalizedBranch
+            }
+            guard current.number == number,
+                  current.label == label,
+                  current.url == url,
+                  current.status == status else {
+                return nil
+            }
+            return current.branch
+        }()
+        let effectiveChecks: SidebarPullRequestChecksStatus? = {
+            if let checks {
+                return checks
+            }
+            guard current.number == number,
+                  current.label == label,
+                  current.url == url,
+                  current.status == status else {
+                return nil
+            }
+            return current.checks
+        }()
+        return current.number != number
+            || current.label != label
+            || current.url != url
+            || current.status != status
+            || current.branch != effectiveBranch
+            || current.checks != effectiveChecks
     }
 
     nonisolated static func shouldReplacePorts(current: [Int]?, next: [Int]) -> Bool {
@@ -3404,14 +3436,29 @@ class TerminalController {
         }
 
         var found = false
+        var protected = false
         v2MainSync {
             if let ws = tabManager.tabs.first(where: { $0.id == wsId }) {
+                guard tabManager.canCloseWorkspace(ws) else {
+                    protected = true
+                    found = true
+                    return
+                }
                 tabManager.closeWorkspace(ws)
                 found = true
             }
         }
 
         let windowId = v2ResolveWindowId(tabManager: tabManager)
+        if protected {
+            return .err(code: "protected", message: workspaceCloseProtectedMessage(), data: [
+                "window_id": v2OrNull(windowId?.uuidString),
+                "window_ref": v2Ref(kind: .window, uuid: windowId),
+                "workspace_id": wsId.uuidString,
+                "workspace_ref": v2Ref(kind: .workspace, uuid: wsId),
+                "pinned": true
+            ])
+        }
         return found
             ? .ok([
                 "window_id": v2OrNull(windowId?.uuidString),
@@ -3424,6 +3471,14 @@ class TerminalController {
                 "workspace_ref": v2Ref(kind: .workspace, uuid: wsId)
             ])
     }
+
+    private func workspaceCloseProtectedMessage() -> String {
+        String(
+            localized: "workspace.closeProtected.message",
+            defaultValue: "Pinned workspaces can't be closed while pinned. Unpin the workspace first."
+        )
+    }
+
     private func v2WorkspaceMoveToWindow(params: [String: Any]) -> V2CallResult {
         guard let wsId = v2UUID(params, "workspace_id") else {
             return .err(code: "invalid_params", message: "Missing or invalid workspace_id", data: nil)
@@ -3901,7 +3956,8 @@ class TerminalController {
             "pin", "unpin", "rename", "clear_name",
             "move_up", "move_down", "move_top",
             "close_others", "close_above", "close_below",
-            "mark_read", "mark_unread"
+            "mark_read", "mark_unread",
+            "set_color", "clear_color"
         ]
 
         var result: V2CallResult = .err(code: "invalid_params", message: "Unknown workspace action", data: [
@@ -4026,6 +4082,35 @@ class TerminalController {
             case "mark_unread":
                 AppDelegate.shared?.notificationStore?.markUnread(forTabId: workspace.id)
                 finish()
+
+            case "set_color":
+                guard let colorRaw = v2String(params, "color"), !colorRaw.isEmpty else {
+                    result = .err(code: "invalid_params", message: "set-color requires --color", data: nil)
+                    return
+                }
+                // Resolve named color to hex via palette lookup
+                let resolved: String
+                if colorRaw.hasPrefix("#") {
+                    guard let normalized = WorkspaceTabColorSettings.normalizedHex(colorRaw) else {
+                        result = .err(code: "invalid_params", message: "Invalid hex color '\(colorRaw)'. Expected #RRGGBB", data: nil)
+                        return
+                    }
+                    resolved = normalized
+                } else if let entry = WorkspaceTabColorSettings.defaultPalette.first(where: {
+                    $0.name.lowercased() == colorRaw.lowercased()
+                }) {
+                    resolved = entry.hex
+                } else {
+                    let names = WorkspaceTabColorSettings.defaultPalette.map(\.name).joined(separator: ", ")
+                    result = .err(code: "invalid_params", message: "Unknown color '\(colorRaw)'. Use #RRGGBB or: \(names)", data: nil)
+                    return
+                }
+                tabManager.setTabColor(tabId: workspace.id, color: resolved)
+                finish(["color": resolved])
+
+            case "clear_color":
+                tabManager.setTabColor(tabId: workspace.id, color: nil)
+                finish(["color": NSNull()])
 
             default:
                 result = .err(code: "invalid_params", message: "Unknown workspace action", data: [
@@ -6251,6 +6336,7 @@ class TerminalController {
             return .err(code: "unavailable", message: "TabManager not available", data: nil)
         }
 
+        let explicitSurfaceId = v2UUID(params, "surface_id")
         let title = (params["title"] as? String) ?? "Notification"
         let subtitle = (params["subtitle"] as? String) ?? ""
         let body = (params["body"] as? String) ?? ""
@@ -6261,7 +6347,15 @@ class TerminalController {
                 result = .err(code: "not_found", message: "Workspace not found", data: nil)
                 return
             }
-            let surfaceId = ws.focusedPanelId
+            if let explicitSurfaceId, ws.panels[explicitSurfaceId] == nil {
+                result = .err(
+                    code: "not_found",
+                    message: "Surface not found",
+                    data: ["surface_id": explicitSurfaceId.uuidString]
+                )
+                return
+            }
+            let surfaceId = explicitSurfaceId ?? ws.focusedPanelId
             TerminalNotificationStore.shared.addNotification(
                 tabId: ws.id,
                 surfaceId: surfaceId,
@@ -7087,9 +7181,18 @@ class TerminalController {
 
             let sourcePaneUUID = ws.paneId(forPanelId: sourceSurfaceId)?.id
 
+            let directionStr = v2String(params, "direction") ?? "right"
+            guard let direction = parseSplitDirection(directionStr) else {
+                result = .err(code: "invalid_params", message: "Invalid direction '\(directionStr)' (left|right|up|down)", data: nil)
+                return
+            }
+            let orientation: SplitOrientation = direction.isHorizontal ? .horizontal : .vertical
+            let insertFirst = (direction == .left || direction == .up)
+
             let createdPanel = ws.newMarkdownSplit(
                 from: sourceSurfaceId,
-                orientation: .horizontal,
+                orientation: orientation,
+                insertFirst: insertFirst,
                 filePath: filePath,
                 focus: v2FocusAllowed()
             )
@@ -10844,8 +10947,8 @@ class TerminalController {
           clear_progress [--tab=X] - Clear progress bar
           report_git_branch <branch> [--status=dirty] [--tab=X] [--panel=Y] - Report git branch
           clear_git_branch [--tab=X] [--panel=Y] - Clear git branch
-          report_pr <number> <url> [--label=PR] [--state=open|merged|closed] [--tab=X] [--panel=Y] - Report pull request / review item
-          report_review <number> <url> [--label=MR] [--state=open|merged|closed] [--tab=X] [--panel=Y] - Alias for provider-specific review item
+          report_pr <number> <url> [--label=PR] [--state=open|merged|closed] [--branch=<name>] [--checks=pass|fail|pending] [--tab=X] [--panel=Y] - Report pull request / review item
+          report_review <number> <url> [--label=MR] [--state=open|merged|closed] [--checks=pass|fail|pending] [--tab=X] [--panel=Y] - Alias for provider-specific review item
           clear_pr [--tab=X] [--panel=Y] - Clear pull request
           report_ports <port1> [port2...] [--tab=X] [--panel=Y] - Report listening ports
           report_tty <tty_name> [--tab=X] [--panel=Y] - Register TTY for batched port scanning
@@ -10917,26 +11020,30 @@ class TerminalController {
         let name = parts[0].lowercased()
         let combo = parts[1].trimmingCharacters(in: .whitespacesAndNewlines)
 
-        let defaultsKey: String?
+        let action: KeyboardShortcutSettings.Action?
         switch name {
         case "focus_left", "focusleft":
-            defaultsKey = KeyboardShortcutSettings.focusLeftKey
+            action = .focusLeft
         case "focus_right", "focusright":
-            defaultsKey = KeyboardShortcutSettings.focusRightKey
+            action = .focusRight
         case "focus_up", "focusup":
-            defaultsKey = KeyboardShortcutSettings.focusUpKey
+            action = .focusUp
         case "focus_down", "focusdown":
-            defaultsKey = KeyboardShortcutSettings.focusDownKey
+            action = .focusDown
+        case "workspace_digits", "workspace_number", "select_workspace_by_number":
+            action = .selectWorkspaceByNumber
+        case "surface_digits", "surface_number", "select_surface_by_number":
+            action = .selectSurfaceByNumber
         default:
-            defaultsKey = nil
+            action = nil
         }
 
-        guard let defaultsKey else {
-            return "ERROR: Unknown shortcut name. Supported: focus_left, focus_right, focus_up, focus_down"
+        guard let action else {
+            return "ERROR: Unknown shortcut name. Supported: focus_left, focus_right, focus_up, focus_down, workspace_digits, surface_digits"
         }
 
         if combo.lowercased() == "clear" || combo.lowercased() == "default" || combo.lowercased() == "reset" {
-            UserDefaults.standard.removeObject(forKey: defaultsKey)
+            KeyboardShortcutSettings.resetShortcut(for: action)
             return "OK"
         }
 
@@ -10951,10 +11058,13 @@ class TerminalController {
             option: parsed.modifierFlags.contains(.option),
             control: parsed.modifierFlags.contains(.control)
         )
-        guard let data = try? JSONEncoder().encode(shortcut) else {
-            return "ERROR: Failed to encode shortcut"
+        if action.usesNumberedDigitMatching,
+           action.normalizedRecordedShortcut(shortcut) == nil {
+            return "ERROR: Numbered shortcuts must use a digit key (1-9). Example: ctrl+1"
         }
-        UserDefaults.standard.set(data, forKey: defaultsKey)
+
+        let storedShortcut = action.normalizedRecordedShortcut(shortcut) ?? shortcut
+        KeyboardShortcutSettings.setShortcut(storedShortcut, for: action)
         return "OK"
     }
 
@@ -12878,14 +12988,18 @@ class TerminalController {
         guard let tabManager = tabManager else { return "ERROR: TabManager not available" }
         guard let uuid = UUID(uuidString: tabId) else { return "ERROR: Invalid tab ID" }
 
-        var success = false
+        var result = "ERROR: Tab not found"
         DispatchQueue.main.sync {
             if let tab = tabManager.tabs.first(where: { $0.id == uuid }) {
+                guard tabManager.canCloseWorkspace(tab) else {
+                    result = "ERROR: \(workspaceCloseProtectedMessage())"
+                    return
+                }
                 tabManager.closeTab(tab)
-                success = true
+                result = "OK"
             }
         }
-        return success ? "OK" : "ERROR: Tab not found"
+        return result
     }
 
     private func selectWorkspace(_ arg: String) -> String {
@@ -13928,10 +14042,11 @@ class TerminalController {
     }
 
     private func resolveTabForReport(_ args: String) -> Tab? {
-        guard let tabManager else { return nil }
         let parsed = parseOptions(args)
         if let tabArg = parsed.options["tab"], !tabArg.isEmpty {
-            if let tab = resolveTab(from: tabArg, tabManager: tabManager) {
+            // First try the local tabManager if available
+            if let tabManager = self.tabManager,
+               let tab = resolveTab(from: tabArg, tabManager: tabManager) {
                 return tab
             }
             // The tab may belong to a different window — search all contexts.
@@ -13941,6 +14056,8 @@ class TerminalController {
             }
             return nil
         }
+        // Only require self.tabManager when using the selected tab (no --tab arg)
+        guard let tabManager = self.tabManager else { return nil }
         guard let selectedId = tabManager.selectedTabId else { return nil }
         return tabManager.tabs.first(where: { $0.id == selectedId })
     }
@@ -14045,7 +14162,6 @@ class TerminalController {
     }
 
     private func upsertSidebarMetadata(_ args: String, missingError: String) -> String {
-        guard tabManager != nil else { return "ERROR: TabManager not available" }
         let parsed = parseOptionsNoStop(args)
         guard parsed.positional.count >= 2 else { return missingError }
 
@@ -14492,7 +14608,12 @@ class TerminalController {
                 let validSurfaceIds = Set(tab.panels.keys)
                 tab.pruneSurfaceMetadata(validSurfaceIds: validSurfaceIds)
                 guard validSurfaceIds.contains(scope.panelId) else { return }
-                tab.updatePanelGitBranch(panelId: scope.panelId, branch: branch, isDirty: isDirty)
+                tabManager.updateSurfaceGitBranch(
+                    tabId: scope.workspaceId,
+                    surfaceId: scope.panelId,
+                    branch: branch,
+                    isDirty: isDirty
+                )
             }
             return "OK"
         }
@@ -14523,7 +14644,7 @@ class TerminalController {
                 let validSurfaceIds = Set(tab.panels.keys)
                 tab.pruneSurfaceMetadata(validSurfaceIds: validSurfaceIds)
                 guard validSurfaceIds.contains(scope.panelId) else { return }
-                tab.clearPanelGitBranch(panelId: scope.panelId)
+                tabManager.clearSurfaceGitBranch(tabId: scope.workspaceId, surfaceId: scope.panelId)
             }
             return "OK"
         }
@@ -14541,7 +14662,7 @@ class TerminalController {
     private func reportPullRequest(_ args: String) -> String {
         let parsed = parseOptions(args)
         guard parsed.positional.count >= 2 else {
-            return "ERROR: Missing pull request number or URL — usage: report_pr <number> <url> [--label=PR] [--state=open|merged|closed] [--tab=X] [--panel=Y]"
+            return "ERROR: Missing pull request number or URL — usage: report_pr <number> <url> [--label=PR] [--state=open|merged|closed] [--branch=<name>] [--checks=pass|fail|pending] [--tab=X] [--panel=Y]"
         }
 
         let rawNumber = parsed.positional[0].trimmingCharacters(in: .whitespacesAndNewlines)
@@ -14561,10 +14682,21 @@ class TerminalController {
         guard let status = SidebarPullRequestStatus(rawValue: statusRaw) else {
             return "ERROR: Invalid pull request state '\(statusRaw)' — use: open, merged, closed"
         }
+        let branch = normalizedOptionValue(parsed.options["branch"])
+
+        let checks: SidebarPullRequestChecksStatus?
+        if let rawChecks = normalizedOptionValue(parsed.options["checks"]) {
+            guard let parsedChecks = SidebarPullRequestChecksStatus(rawValue: rawChecks.lowercased()) else {
+                return "ERROR: Invalid pull request checks '\(rawChecks)' — use: pass, fail, pending"
+            }
+            checks = parsedChecks
+        } else {
+            checks = nil
+        }
 
         let labelRaw = normalizedOptionValue(parsed.options["label"]) ?? "PR"
         guard !labelRaw.isEmpty else {
-            return "ERROR: Invalid review label — usage: report_pr <number> <url> [--label=PR] [--state=open|merged|closed] [--tab=X] [--panel=Y]"
+            return "ERROR: Invalid review label — usage: report_pr <number> <url> [--label=PR] [--state=open|merged|closed] [--branch=<name>] [--checks=pass|fail|pending] [--tab=X] [--panel=Y]"
         }
         let label = String(labelRaw.prefix(16))
 
@@ -14573,14 +14705,16 @@ class TerminalController {
         return schedulePanelMetadataMutation(
             args: args,
             options: parsed.options,
-            missingPanelUsage: "report_pr <number> <url> [--label=PR] [--state=open|merged|closed] [--tab=X] [--panel=Y]"
+            missingPanelUsage: "report_pr <number> <url> [--label=PR] [--state=open|merged|closed] [--branch=<name>] [--checks=pass|fail|pending] [--tab=X] [--panel=Y]"
         ) { tab, surfaceId in
             guard Self.shouldReplacePullRequest(
                 current: tab.panelPullRequests[surfaceId],
                 number: number,
                 label: label,
                 url: url,
-                status: status
+                status: status,
+                branch: branch,
+                checks: checks
             ) else {
                 return
             }
@@ -14590,7 +14724,9 @@ class TerminalController {
                 number: number,
                 label: label,
                 url: url,
-                status: status
+                status: status,
+                branch: branch,
+                checks: checks
             )
         }
     }
@@ -14958,12 +15094,14 @@ class TerminalController {
                 lines.append("git_branch=none")
             }
 
-            if let pr = tab.pullRequest {
+            if let pr = tab.sidebarPullRequestsInDisplayOrder().first {
                 lines.append("pr=#\(pr.number) \(pr.status.rawValue) \(pr.url.absoluteString)")
                 lines.append("pr_label=\(pr.label)")
+                lines.append("pr_checks=\(pr.checks?.rawValue ?? "none")")
             } else {
                 lines.append("pr=none")
                 lines.append("pr_label=none")
+                lines.append("pr_checks=none")
             }
 
             if tab.listeningPorts.isEmpty {

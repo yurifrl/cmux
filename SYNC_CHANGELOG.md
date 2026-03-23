@@ -1,3 +1,56 @@
+## Sync 2026-03-23 21:34 UTC — 224 commits from upstream
+
+- b5fb304a Handle headless CI runners in browser find focus UI test
+- 381aab0d Add persistent virtual display for all UI regression tests
+- 81aaa8e2 Fix UI test harness validation: make startPath optional
+- 82a9ccf2 Fix sandbox file write issue: use start-delay-ms for display helper
+- 0c4415ce Pre-launch app from CI shell to escape XCTest sandbox
+- 94c656fb Force windows visible on headless CI runners for UI test rendering
+- 6233f1b2 Use Process with sandbox-aware temp paths for UI test app launch
+- 79aae4fe Use NSWorkspace with activates=false to launch app in UI test
+- eee5862c Add verbose diagnostics to display resolution UI test launch failure
+- e4ef74c8 Fix env contamination in Process-based UI test app launch
+- 88751b2d Launch app binary directly via Process in display resolution UI test
+- ae064802 Use NSWorkspace to launch app in display resolution UI test
+- fc858fcf Revert UI test foreground activation changes back to 56a4d258
+- 82a16aa7 Replace XCUIApplication with NSWorkspace for display regression test
+- 75375ab7 Fix display resolution UI test foreground activation on CI
+- 10fd323b Fix display regression UI test launch gating
+- 54ec524a Fix display regression launch on CI runner
+- cbb21872 Fix UI test foreground activation on CI (#1981)
+- 56a4d258 Fix blank terminal renders after workspace switches (#1964)
+- 59f526a4 fix(terminal): prevent cursor movement on double-click selection (#1709)
+- ef9d917b Fix reload.sh build failure exit handling (#1888)
+- c1c028e6 Preserve explicit wheel scrollback against passive follow
+- 7634abe6 Add regression test for wheel scrollback follow bug
+- fd279bdc Fix splitter hitbox overlap and terminal scrollbar width resync (#1950)
+- 5ced3134 Fix browser freeze after pane split by reattaching WKWebView rendering state (#1852)
+- e8cf83ca Fix claude-hook stop teardown races (#1954)
+- 100612d9 Fix locale page crashes under Google Translate (#1956)
+- eb248a1c Fix Cmd+Shift+key combos being swallowed for unbound keys (#1959)
+- 5de59cd4 fix: stop consuming repeated Escape keys after command palette dismissal
+- fd1376d2 fix: update WorkspaceShortcutMapper tests to match renamed API from #1951
+- 33dcc606 Customizable number shortcuts (#1951)
+- ad57e107 fix: dispatch UI updates to main thread for macOS 26 compatibility
+- 44b4374f fix: harden Sparkle manual update dialog flow
+- e935eb57 Fix browser pane video fullscreen
+- ded07306 Remove em dash from code comment
+- a3962426 Address review feedback: guard TabManager call site, clarify malloc_size
+- b1b07bf5 Fix #1870: prevent split crash on Intel Macs caused by stale font pointer
+- 8cd9cd96 Fix keyboard shortcuts not working with Korean (한글) input mode
+- 5cef77e4 Self-heal tmux attention routing for cmux panes
+- f0fb098d Add tmux stale-surface routing regression tests
+- 5051123c Keep tmux CMUX sync scoped to the workspace
+- af5207db Add tmux surface scope regression tests
+- 5e9a58d1 Sync CMUX environment through tmux automatically
+- c325e2b4 Add tmux shell environment regression tests
+- 72f2e3b8 fix: show Sparkle dialog on first manual update check
+- f0dcdf90 test: cover first-click Sparkle dialog regression
+- a592ed12 Add failing regression test for browser find focus (#1891)
+- c2065b13 Fix SSH image transfer cleanup and IPv6 followups (#1907)
+- 43c61f6e Fix SSH image transfer followups (#1904)
+- cdf8d367 Fix browser back navigation history handoff (#1897)
+
 ## Sync 2026-03-17 14:51 UTC — 44 commits from upstream
 
 - 8d8fadbb Add hidden CLI command for live terminal debugging (#1599)
