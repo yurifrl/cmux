@@ -99,7 +99,10 @@ jobs:
         id: ff
         if: steps.check.outputs.skip != 'true' && steps.changelog.outputs.has_changes == 'true'
         continue-on-error: true
-        run: git merge --ff-only upstream/main
+        run: |
+          git merge --ff-only upstream/main
+          # Verify clean state
+          test -z "$(git diff --name-only --diff-filter=U)"
 
       - name: Try merge favoring ours
         id: merge_ours
@@ -108,7 +111,31 @@ jobs:
         run: |
           git reset --hard origin/main
           git checkout -B "${{ steps.branch.outputs.name }}"
-          git merge -X ours upstream/main -m "sync: merge upstream (favor ours)"
+          git merge -X ours upstream/main -m "sync: merge upstream (favor ours)" || {
+            # If merge -X ours still has conflicts (submodules, binary files),
+            # resolve them by taking ours
+            CONFLICTS=$(git diff --name-only --diff-filter=U)
+            if [ -n "$CONFLICTS" ]; then
+              echo "Resolving remaining conflicts by taking ours:"
+              echo "$CONFLICTS"
+              echo "$CONFLICTS" | while read f; do
+                git checkout --ours "$f" 2>/dev/null || git rm "$f" 2>/dev/null || true
+                git add "$f" 2>/dev/null || true
+              done
+              # Also handle submodule conflicts
+              git submodule foreach --recursive 'git checkout HEAD -- . 2>/dev/null || true' 2>/dev/null || true
+              git add -A
+              git commit -m "sync: merge upstream (favor ours, force-resolved conflicts)"
+            else
+              exit 1
+            fi
+          }
+          # Final verification
+          if [ -n "$(git diff --name-only --diff-filter=U 2>/dev/null)" ]; then
+            echo "Unresolved conflicts remain after merge -X ours + force resolve"
+            git diff --name-only --diff-filter=U
+            exit 1
+          fi
 
       - name: Claude Code resolve conflicts
         id: claude
@@ -117,6 +144,10 @@ jobs:
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
+          if [ -z "$ANTHROPIC_API_KEY" ]; then
+            echo "No ANTHROPIC_API_KEY set, skipping Claude resolution"
+            exit 1
+          fi
           npm install -g @anthropic-ai/claude-code
           git reset --hard origin/main
           git checkout -B "${{ steps.branch.outputs.name }}"
@@ -131,6 +162,12 @@ jobs:
           1. List conflicted files with: git diff --name-only --diff-filter=U
           2. For each file, understand BOTH sides and resolve intelligently
           3. git add and git commit -m 'sync: claude-resolved merge (favoring ours)'"
+          # Verify Claude actually resolved everything
+          if [ -n "$(git diff --name-only --diff-filter=U)" ]; then
+            echo "Claude failed to resolve all conflicts"
+            git diff --name-only --diff-filter=U
+            exit 1
+          fi
 
       # Always preserve our workflow files and fork customizations
       - name: Restore our workflow files
@@ -185,14 +222,22 @@ jobs:
       - name: Update SYNC_CHANGELOG.md
         if: steps.result.outputs.status == 'success' && steps.changelog.outputs.has_changes == 'true'
         run: |
-          if [ -f SYNC_CHANGELOG.md ]; then
-            cat /tmp/sync-entry.md SYNC_CHANGELOG.md > /tmp/merged-changelog.md
-            mv /tmp/merged-changelog.md SYNC_CHANGELOG.md
-          else
-            cp /tmp/sync-entry.md SYNC_CHANGELOG.md
+          # Ensure clean git state before committing
+          if [ -n "$(git diff --name-only --diff-filter=U 2>/dev/null)" ]; then
+            echo "ERROR: Unresolved conflicts still present, cannot update changelog"
+            exit 1
           fi
-          git add SYNC_CHANGELOG.md
-          git commit --amend --no-edit || git commit -m "sync: update changelog"
+          if [ -f /tmp/sync-entry.md ]; then
+            if [ -f SYNC_CHANGELOG.md ]; then
+              cat /tmp/sync-entry.md SYNC_CHANGELOG.md > /tmp/merged-changelog.md
+              mv /tmp/merged-changelog.md SYNC_CHANGELOG.md
+            else
+              cp /tmp/sync-entry.md SYNC_CHANGELOG.md
+            fi
+            git add SYNC_CHANGELOG.md
+            # Try amend first, fall back to new commit
+            git commit --amend --no-edit 2>/dev/null || git commit -m "sync: update changelog" || true
+          fi
 
       - name: Push branch
         if: steps.result.outputs.status == 'success'
