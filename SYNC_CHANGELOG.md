@@ -1,3 +1,56 @@
+## Sync 2026-03-25 07:06 UTC — 266 commits from upstream
+
+- 3952c258 Fix workspace creation crash after restore (#1985)
+- a7e50505 Fix SSH control master cleanup on remote teardown (#2104)
+- 7cbd07e8 Add set-color/clear-color workspace actions for tab color via CLI (#1873)
+- 533699f9 feat: add arrow keys, shift+tab, home/end/delete/pageup/pagedown to sendNamedKey (#1920)
+- 71828fe8 Reduce shell integration prompt latency (#2109)
+- 23253e6d Validate workspace color during cmux.json decode (#2112)
+- 321f8c14 fix(browser): keep IME Enter on composition path (#2108)
+- 983ef253 Skip sidebar PR lookup on main/master (#2110)
+- b9c656b9 feat: cmux.json for custom commands (#2011)
+- 09e31448 Add Codex CLI hooks integration (#2103)
+- 03355ca3 Consume Cmd+number shortcuts even when workspace index is out of bounds (#2033)
+- 9a24db93 Fix browser portal leaking to other tabs on Bonsplit tab switch (#2000)
+- b9195410 Fix panel resize stuttering when tiled with browser panels (#1969)
+- a395e8c3 fix: prevent Japanese IME confirmation Enter from executing command (#2075)
+- 22448197 Fix Ghostty font-family fallback chain regression (#1308)
+- 4a8fd3d0 Fix dock icon not auto-switching with system dark mode (#1928)
+- 960006e6 reload.sh: default to build-only, add --launch flag (#2097)
+- 65867b86 fix: resolve workspace placement before init (#2099)
+- 3a448899 Remove fork PR guards from CI workflows (#2092)
+- bc5b6442 fix: increase contentSideHitWidth to prevent accidental window resize (#2018)
+- 6d9c9373 docs: remove outdated Claude Code hooks section from notifications (#2053)
+- a0ae0855 Fix workspace creation failing after long uptime (#1930)
+- bc9f884e Export CMUX_SOCKET alongside CMUX_SOCKET_PATH in terminal env (#1991)
+- 818864dd Fix sidebar notification persisting after being read (#1933)
+- f436d466 fix(browser): use native value setter for React compatibility (#2059)
+- 56602066 Revert Sparkle manual update dialog flow from #1908 (#2090)
+- 17bcbcc1 Fix all split panes appearing focused after layout restoration (#2088)
+- 2a2374af feat: expose per-surface TTY in tree output (#2040)
+- b24a53dc Add -r shorthand to SKIP_SESSION_ID check in claude wrapper (#1992)
+- 7ffa4477 Fix sidebar badges not refreshing on workspace state change (#2046)
+- 8c0aee31 test: clarify stale portal rebind sync points
+- 7f1e8835 Nudge titlebar folder icon right by 1px
+- c544d49b Shift titlebar folder icon left
+- 836360db fix: hide stale terminal portal after restore churn
+- e41f39bd test: cover stale terminal portal after restore-like rebind
+- 4f5a3174 Clarify workspace insertion regression test
+- 1c45915a Avoid crash in workspace insert index
+- 202a6997 Add regression test for workspace insertion
+- 142c62c7 Add dual licensing (AGPL + commercial) (#2021)
+- b5fb304a Handle headless CI runners in browser find focus UI test
+- 381aab0d Add persistent virtual display for all UI regression tests
+- 81aaa8e2 Fix UI test harness validation: make startPath optional
+- 82a9ccf2 Fix sandbox file write issue: use start-delay-ms for display helper
+- 0c4415ce Pre-launch app from CI shell to escape XCTest sandbox
+- 94c656fb Force windows visible on headless CI runners for UI test rendering
+- 6233f1b2 Use Process with sandbox-aware temp paths for UI test app launch
+- 79aae4fe Use NSWorkspace with activates=false to launch app in UI test
+- eee5862c Add verbose diagnostics to display resolution UI test launch failure
+- e4ef74c8 Fix env contamination in Process-based UI test app launch
+- 88751b2d Launch app binary directly via Process in display resolution UI test
+
 ## Sync 2026-03-17 14:51 UTC — 44 commits from upstream
 
 - 8d8fadbb Add hidden CLI command for live terminal debugging (#1599)
