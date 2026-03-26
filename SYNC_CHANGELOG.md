@@ -1,3 +1,56 @@
+## Sync 2026-03-26 07:13 UTC — 292 commits from upstream
+
+- 8a378152 Fix Cmd+N crash: retain snapshot workspaces through creation (#2183)
+- 61e6a0e2 Fix Release-only Cmd+N workspace snapshot UAF (#2181)
+- b93be12b Fix Cmd+N crash from workspace creation config snapshots (#2178)
+- 0a1d8c22 Skip SSH cleanup after moving the last remote surface (#2123)
+- 95914243 Fix UI regression test self capture
+- 9969c5e6 Fix NSTextView focus-stealer fallback
+- 9295a7f6 Add command palette follow-up regressions
+- 58dc9322 Set CMUX_SOCKET_MODE=allowAll in reload.sh for dev builds (#2165)
+- 8a3ab6b3 Fix command palette focus after terminal find (#2089)
+- b42f64fb Fix update attempt refreshing pill without actually updating (#2168)
+- cbf08459 Fix Cmd+N workspace creation snapshot crashes (#2173)
+- 9f2adce8 fix: guard inherited terminal config against stale surfaces (#2101)
+- 99ca3c9b Fix sidebar update pill cached popover flow (#2142)
+- 049d2962 Fix browser pane restore after reopen (#2141)
+- 17e8bb17 Fix Cmd+N crash from stale workspace creation snapshots
+- ad2c65e0 Add regression test for Cmd+N snapshot close race
+- 71a64a12 Fix titlebar double-click zoom handling (#2130)
+- 0ea16b12 Fix window position restore on relaunch (#2129)
+- da70f3fa Add regression coverage for Cmd+N workspace creation crash (#2127)
+- 0d8597ca New window inherits size from current window (#2124)
+- ffb660de Fix first click on detected update pill (#2117)
+- 57237d9f Sanitize command before execution, not just display (#2122)
+- 5b820411 Handle Cmd+O in handleCustomShortcut to prevent Documents folder open (#2034)
+- 68ff39c4 Fix Ghostty resize_split keybind support (#1899)
+- 3952c258 Fix workspace creation crash after restore (#1985)
+- a7e50505 Fix SSH control master cleanup on remote teardown (#2104)
+- 7cbd07e8 Add set-color/clear-color workspace actions for tab color via CLI (#1873)
+- 533699f9 feat: add arrow keys, shift+tab, home/end/delete/pageup/pagedown to sendNamedKey (#1920)
+- 71828fe8 Reduce shell integration prompt latency (#2109)
+- 23253e6d Validate workspace color during cmux.json decode (#2112)
+- 321f8c14 fix(browser): keep IME Enter on composition path (#2108)
+- 983ef253 Skip sidebar PR lookup on main/master (#2110)
+- b9c656b9 feat: cmux.json for custom commands (#2011)
+- 09e31448 Add Codex CLI hooks integration (#2103)
+- 03355ca3 Consume Cmd+number shortcuts even when workspace index is out of bounds (#2033)
+- 9a24db93 Fix browser portal leaking to other tabs on Bonsplit tab switch (#2000)
+- b9195410 Fix panel resize stuttering when tiled with browser panels (#1969)
+- a395e8c3 fix: prevent Japanese IME confirmation Enter from executing command (#2075)
+- 22448197 Fix Ghostty font-family fallback chain regression (#1308)
+- 4a8fd3d0 Fix dock icon not auto-switching with system dark mode (#1928)
+- 960006e6 reload.sh: default to build-only, add --launch flag (#2097)
+- 65867b86 fix: resolve workspace placement before init (#2099)
+- 3a448899 Remove fork PR guards from CI workflows (#2092)
+- bc5b6442 fix: increase contentSideHitWidth to prevent accidental window resize (#2018)
+- 6d9c9373 docs: remove outdated Claude Code hooks section from notifications (#2053)
+- a0ae0855 Fix workspace creation failing after long uptime (#1930)
+- bc9f884e Export CMUX_SOCKET alongside CMUX_SOCKET_PATH in terminal env (#1991)
+- 818864dd Fix sidebar notification persisting after being read (#1933)
+- f436d466 fix(browser): use native value setter for React compatibility (#2059)
+- 56602066 Revert Sparkle manual update dialog flow from #1908 (#2090)
+
 ## Sync 2026-03-17 14:51 UTC — 44 commits from upstream
 
 - 8d8fadbb Add hidden CLI command for live terminal debugging (#1599)
