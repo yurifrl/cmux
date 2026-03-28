@@ -86,6 +86,28 @@ final class SessionPersistenceTests: XCTestCase {
         )
     }
 
+    func testSaveSkipsRewritingIdenticalSnapshotData() throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cmux-session-tests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let snapshotURL = tempDir.appendingPathComponent("session.json", isDirectory: false)
+        let snapshot = makeSnapshot(version: SessionSnapshotSchema.currentVersion)
+
+        XCTAssertTrue(SessionPersistenceStore.save(snapshot, fileURL: snapshotURL))
+        let firstFileNumber = try fileNumber(for: snapshotURL)
+
+        XCTAssertTrue(SessionPersistenceStore.save(snapshot, fileURL: snapshotURL))
+        let secondFileNumber = try fileNumber(for: snapshotURL)
+
+        XCTAssertEqual(
+            secondFileNumber,
+            firstFileNumber,
+            "Saving identical session data should not replace the snapshot file"
+        )
+    }
+
     func testWorkspaceCustomColorDecodeSupportsMissingLegacyField() throws {
         var snapshot = makeSnapshot(version: SessionSnapshotSchema.currentVersion)
         snapshot.windows[0].tabManager.workspaces[0].customColor = nil
@@ -184,7 +206,7 @@ final class SessionPersistenceTests: XCTestCase {
     }
 
     func testSessionBrowserPanelSnapshotHistoryRoundTrip() throws {
-        let profileID = UUID(uuidString: "8F03A658-5A84-428B-AD03-5A6D04692F64")
+        let profileID = try XCTUnwrap(UUID(uuidString: "8F03A658-5A84-428B-AD03-5A6D04692F64"))
         let source = SessionBrowserPanelSnapshot(
             urlString: "https://example.com/current",
             profileID: profileID,
@@ -671,6 +693,34 @@ final class SessionPersistenceTests: XCTestCase {
         XCTAssertEqual(restored.height, 1_410, accuracy: 0.001)
     }
 
+    func testResolvedWindowFramePreservesExactGeometryWhenDisplayChangesButWindowRemainsAccessible() {
+        let savedFrame = SessionRectSnapshot(x: 1_100, y: -20, width: 1_280, height: 1_000)
+        let savedDisplay = SessionDisplaySnapshot(
+            displayID: 2,
+            frame: SessionRectSnapshot(x: 0, y: 0, width: 2_560, height: 1_440),
+            visibleFrame: SessionRectSnapshot(x: 0, y: 0, width: 2_560, height: 1_410)
+        )
+        let adjustedDisplay = AppDelegate.SessionDisplayGeometry(
+            displayID: 2,
+            frame: CGRect(x: 0, y: 0, width: 2_560, height: 1_440),
+            visibleFrame: CGRect(x: 0, y: 40, width: 2_560, height: 1_360)
+        )
+
+        let restored = AppDelegate.resolvedWindowFrame(
+            from: savedFrame,
+            display: savedDisplay,
+            availableDisplays: [adjustedDisplay],
+            fallbackDisplay: adjustedDisplay
+        )
+
+        XCTAssertNotNil(restored)
+        guard let restored else { return }
+        XCTAssertEqual(restored.minX, 1_100, accuracy: 0.001)
+        XCTAssertEqual(restored.minY, -20, accuracy: 0.001)
+        XCTAssertEqual(restored.width, 1_280, accuracy: 0.001)
+        XCTAssertEqual(restored.height, 1_000, accuracy: 0.001)
+    }
+
     func testResolvedWindowFrameClampsWhenDisplayGeometryChangesEvenWithSameDisplayID() {
         let savedFrame = SessionRectSnapshot(x: 1_303, y: -90, width: 1_280, height: 1_410)
         let savedDisplay = SessionDisplaySnapshot(
@@ -779,6 +829,11 @@ final class SessionPersistenceTests: XCTestCase {
             createdAt: Date().timeIntervalSince1970,
             windows: [window]
         )
+    }
+
+    private func fileNumber(for fileURL: URL) throws -> Int {
+        let attributes = try FileManager.default.attributesOfItem(atPath: fileURL.path)
+        return try XCTUnwrap(attributes[.systemFileNumber] as? Int)
     }
 }
 

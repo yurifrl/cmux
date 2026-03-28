@@ -1,3 +1,56 @@
+## Sync 2026-03-28 07:03 UTC — 325 commits from upstream
+
+- 97fee253 fix: honor CJK-capable font-family before fallback injection (#2241)
+- 27fa3873 Add claude-teams, omo, and __tmux-compat to Go relay CLI for SSH sessions (#2238)
+- 2d51c14b perf: coalesce scrollbar updates during bulk output (#2116)
+- c51f0f15 Fix minimal mode toggle not updating titlebar state (#2218)
+- 609a02c3 Add customizable sidebar selection highlight color (#1824)
+- 63904811 Revert "Fix Intel second-surface config inheritance crash (#2179)" (#2267)
+- 1f4fc476 Fix Intel second-surface config inheritance crash (#2179)
+- c0ec7dc1 feat(i18n): add Ukrainian (uk) localization (#2226)
+- bcf21808 docs: Add localized assets for Korean README (#1811)
+- 9811ea34 Switch release builds to macOS Tahoe runner (#2233)
+- 5c7cafee Switch nightly builds to macOS Tahoe runner (#2231)
+- 6e5903e4 Improve cmux omo error when opencode is not installed (#2230)
+- 30cb3718 Add --no-focus flag to cmux ssh (#2227)
+- 1826cb56 Fix tmux compat store decoding, layout cleanup, and cross-workspace fallback (#2207)
+- 71f0e695 fix(socket): return not_found error when surface_id is provided but unresolvable (#2150)
+- f3c797ee Support modifier+key combinations in send-key (ctrl+enter, shift+tab, etc.) (#1994)
+- ccd84bd5 Fix nightly SSH remote daemon checksum mismatch (#2225)
+- 1b03d23f fix(sidebar): use dedicated setting for port link browser preference (#2219)
+- 84af32c5 Add `cmux omo` command for oh-my-openagent integration (#2087)
+- ee3460b8 docs: add Copilot CLI hooks section to i18n notifications page (#2217)
+- 32124d92 Revert "Merge pull request #1915 from elvistranhere/fix/split-crash-intel-1870" (#2221)
+- bc9e45c8 Fix workspace creation snapshot crash (#2176)
+- 819ceb8e feat(sidebar): make listening ports clickable to open in browser (#1844)
+- 9d8e6a8d docs: add Copilot CLI hook setup to notifications guide (#1875)
+- cfe6cf89 fix: keyboard shortcuts not working with Russian layout (#2202)
+- 66b02604 Add --name flag to new-workspace CLI command (#2160)
+- 0978732c fix: route PWD action to correct TabManager per tabId (#2147)
+- ccaebbd1 Fix workspace shortcut docs (#2211)
+- 46f560fd chore: remove unused koreanRanges constant (#2158)
+- 6a41c9f4 fix(quit): enforce Warn Before Quit when Cmd+Q arrives via app switcher (#2186)
+- 46589f53 Fix SEO indexing: hreflang, canonicals, sitemap, trailing slash (#2193)
+- f507fd81 Fix claude-teams pane anchoring with main-vertical layout (#2119)
+- fe0443fa Fix Cmd+N nightly crash: avoid local Workspace refs in ARC hotpath (#2204)
+- 8a378152 Fix Cmd+N crash: retain snapshot workspaces through creation (#2183)
+- 61e6a0e2 Fix Release-only Cmd+N workspace snapshot UAF (#2181)
+- b93be12b Fix Cmd+N crash from workspace creation config snapshots (#2178)
+- 0a1d8c22 Skip SSH cleanup after moving the last remote surface (#2123)
+- 95914243 Fix UI regression test self capture
+- 9969c5e6 Fix NSTextView focus-stealer fallback
+- 9295a7f6 Add command palette follow-up regressions
+- 58dc9322 Set CMUX_SOCKET_MODE=allowAll in reload.sh for dev builds (#2165)
+- 8a3ab6b3 Fix command palette focus after terminal find (#2089)
+- b42f64fb Fix update attempt refreshing pill without actually updating (#2168)
+- cbf08459 Fix Cmd+N workspace creation snapshot crashes (#2173)
+- 9f2adce8 fix: guard inherited terminal config against stale surfaces (#2101)
+- 99ca3c9b Fix sidebar update pill cached popover flow (#2142)
+- 049d2962 Fix browser pane restore after reopen (#2141)
+- 17e8bb17 Fix Cmd+N crash from stale workspace creation snapshots
+- ad2c65e0 Add regression test for Cmd+N snapshot close race
+- 71a64a12 Fix titlebar double-click zoom handling (#2130)
+
 ## Sync 2026-03-17 14:51 UTC — 44 commits from upstream
 
 - 8d8fadbb Add hidden CLI command for live terminal debugging (#1599)
