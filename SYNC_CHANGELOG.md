@@ -1,3 +1,56 @@
+## Sync 2026-03-31 07:20 UTC — 382 commits from upstream
+
+- d75e97fb Align switcher fingerprint tests with display names
+- 514f6b43 Revert cmd-p title churn lifecycle changes
+- 57e4f823 Avoid retaining workspaces in cmd-p switcher
+- a5120be3 Revert "Map Shift+Enter to raw newline in Ghostty"
+- 4c1bdb55 Address cmd-p review feedback
+- d3a3dab7 Live-update cmd-p workspace titles
+- 208e741d Clarify command palette open-state routing test
+- 543481ce Fix transparent background flash during sidebar toggle (#2378)
+- 0322e78e Stop stale command palette empty-state flashes
+- 2877e2c8 Add command palette empty-state regression test
+- 8979c8ca Let ctrl-k reach command palette text editing
+- c7bb6912 Keep cmd-p stable during workspace title churn
+- 1dab226b Add ctrl-k command palette regression tests
+- ae00d5d2 Add regression test for switcher title churn
+- dd54927c Add React Grab inject button to browser toolbar (#2373)
+- 978dd2c0 Add hover background to split action buttons (#2271)
+- d015ace0 Fix minimal mode tab bar disappearing in fullscreen (#2375)
+- c2abfb97 Switch nightly Sparkle feed URL to R2 (#2366)
+- 9d9559fb Relicense from AGPL-3.0 to GPL-3.0 (#2364)
+- 27aab3a0 Simplify R2 to appcast-only (keep DMGs on GitHub) (#2363)
+- f6c949ad Add cmd-click fallback for bare filenames (ls output) (#2294)
+- 8336aae8 Use pane TTY fallback for tmux Shift+Enter
+- d6d9130c Add R2 dual-write for nightly appcast and DMGs (#2335)
+- 90a9edb7 Fix browser pane hangs from redundant portal refreshes (#2353)
+- f4c99d34 Fix tmux Shift+Enter state reporting
+- 0666a98a Fix Dock persistence for manual app icons (#2360)
+- 2c5c4fcf Fix tmux-compat split-window surface resolution (#2351)
+- 867c93e4 Keep cmux browser Find shortcuts authoritative (#2356)
+- 9ce4997c Fix Shift+Enter tmux follow-up regressions
+- 6a39bac0 Fix update error details dialog overflow (#2359)
+- ae59e571 Fix #2347 terminal focus and surface recovery (#2354)
+- 90802483 Gate Shift+Enter newline remap to tmux
+- 29c0f525 Add New Window to Dock menu (#2340)
+- 54001553 Map Shift+Enter to raw newline in Ghostty
+- 27db2eb8 Add reset-terminal terminal menu workaround (#2349)
+- 63dd7281 Fix fullscreen new windows opening in current Space (#2345)
+- 79bcf1d3 Fix browser pane dark-mode leak on light pages (#2346)
+- 35cb42fb Add copy-on-select preference (#2282)
+- 94cc865e Fix sidebar live refresh for branch and PR state (#2331)
+- e419fd91 Fix remote proxy notification spam with cooldown, backoff, and SSH keepalive (#2325) (#2330)
+- 9e753555 Fix sidebar layout loop in workspace list (#2328)
+- d95158e6 Fix #2210: coalesce portal sync to latest geometry (#2214)
+- 45090d23 Bump version to 0.63.1 (#2310)
+- 386f5abf Fix macOS compatibility: versioned geometry persistence and re-entrant layout crash (#2308)
+- f1be3978 Fix stale session geometry crash after 0.63.0 upgrade (#2306)
+- 97c2bc92 Defer layout follow-up flush to avoid re-entrant displayIfNeeded crash (#2305)
+- e4aeed8d Prepare 0.63.0 release (#2297)
+- f0491955 Build universal binary (arm64 + x86_64) in stable release workflow (#2287)
+- 550d98ca Add Match Terminal Background sidebar setting (#2293)
+- e9afc223 Skip quit confirmation for tagged DEV builds (#2288)
+
 ## Sync 2026-03-17 14:51 UTC — 44 commits from upstream
 
 - 8d8fadbb Add hidden CLI command for live terminal debugging (#1599)
