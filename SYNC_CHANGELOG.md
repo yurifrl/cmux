@@ -1,3 +1,56 @@
+## Sync 2026-04-01 07:25 UTC — 404 commits from upstream
+
+- a00b46ce Fix zsh EPOCHSECONDS fallback
+- 3bc9b759 Restore idle PR refresh cadence
+- 47c50458 Make sidebar PR lookups event-driven
+- 92d4fa68 Add SSH, Claude Code Teams, browser import, custom commands to README (#2445)
+- 5835bff1 Update claude-teams blog: link to Claude docs, mention auto env setup (#2426)
+- 51fe28e4 Add cmux SSH blog post (#2377)
+- e2e5f87b Cache Zig package downloads in CI to prevent TLS flakes (#2423)
+- 02e5ef94 Localize tab context menu and alert strings (#1998)
+- acd45bbd Remove copy-on-select setting
+- 3666f48a Scope sidebar row observation to visible workspace state
+- d75e97fb Align switcher fingerprint tests with display names
+- 514f6b43 Revert cmd-p title churn lifecycle changes
+- 57e4f823 Avoid retaining workspaces in cmd-p switcher
+- f82e0160 Revert "Skip flaky socket security tests that time out on CI runners"
+- 5fa2a342 Revert "Skip flaky socket tests in macOS Compatibility workflow too"
+- 1918264a Add "Open Folder in VS Code (Inline)" via menu and command palette
+- 6295ec74 Skip flaky socket tests in macOS Compatibility workflow too
+- ca45a99c Skip flaky socket security tests that time out on CI runners
+- a5120be3 Revert "Map Shift+Enter to raw newline in Ghostty"
+- 83789437 Avoid duplicate sidebar git metadata publishes
+- 642aead0 Add regression tests for duplicate sidebar git publishes
+- 4c1bdb55 Address cmd-p review feedback
+- d3a3dab7 Live-update cmd-p workspace titles
+- 208e741d Clarify command palette open-state routing test
+- 543481ce Fix transparent background flash during sidebar toggle (#2378)
+- 0322e78e Stop stale command palette empty-state flashes
+- 2877e2c8 Add command palette empty-state regression test
+- 8979c8ca Let ctrl-k reach command palette text editing
+- c7bb6912 Keep cmd-p stable during workspace title churn
+- 1dab226b Add ctrl-k command palette regression tests
+- ae00d5d2 Add regression test for switcher title churn
+- dd54927c Add React Grab inject button to browser toolbar (#2373)
+- 978dd2c0 Add hover background to split action buttons (#2271)
+- d015ace0 Fix minimal mode tab bar disappearing in fullscreen (#2375)
+- c2abfb97 Switch nightly Sparkle feed URL to R2 (#2366)
+- 9d9559fb Relicense from AGPL-3.0 to GPL-3.0 (#2364)
+- 27aab3a0 Simplify R2 to appcast-only (keep DMGs on GitHub) (#2363)
+- f6c949ad Add cmd-click fallback for bare filenames (ls output) (#2294)
+- 8336aae8 Use pane TTY fallback for tmux Shift+Enter
+- d6d9130c Add R2 dual-write for nightly appcast and DMGs (#2335)
+- 90a9edb7 Fix browser pane hangs from redundant portal refreshes (#2353)
+- f4c99d34 Fix tmux Shift+Enter state reporting
+- 0666a98a Fix Dock persistence for manual app icons (#2360)
+- 2c5c4fcf Fix tmux-compat split-window surface resolution (#2351)
+- 867c93e4 Keep cmux browser Find shortcuts authoritative (#2356)
+- 9ce4997c Fix Shift+Enter tmux follow-up regressions
+- 6a39bac0 Fix update error details dialog overflow (#2359)
+- ae59e571 Fix #2347 terminal focus and surface recovery (#2354)
+- 90802483 Gate Shift+Enter newline remap to tmux
+- 29c0f525 Add New Window to Dock menu (#2340)
+
 ## Sync 2026-03-17 14:51 UTC — 44 commits from upstream
 
 - 8d8fadbb Add hidden CLI command for live terminal debugging (#1599)
