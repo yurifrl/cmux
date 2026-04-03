@@ -1,3 +1,56 @@
+## Sync 2026-04-03 07:14 UTC — 468 commits from upstream
+
+- 26ffcf12 test: clarify korean IME regression naming
+- 14ca576c fix: suppress fallback text during IME composition
+- a69bdc69 test: cover korean IME composing text leak
+- 08fd53eb fix: require divider-origin fast resize
+- 401ffb16 fix: scope split divider drags to one mouse gesture
+- 41ed8b68 Add Claude Binary Path setting (#2514)
+- 2dbb8c29 Avoid duplicate browser portal sync during split drag
+- d4c1ef25 Add GitHub stars badge to translated READMEs
+- 3d889fe0 Keep GitHub stars badge stable across navigation (#2476)
+- dc16b3bd Fix GitHub star badge formatting (#2473)
+- b71d6fbc Fix external insertText escape handling
+- 88e5b07b Fix web header overlap (#2452)
+- 8258459a Preserve symlink aliases for external opens
+- ac1bf555 Add regression tests for symlinked external opens
+- 7a2e9b68 Make Tahoe glass teardown reversible (#2459)
+- 00b4810e Harden bash nested-shell review coverage
+- adfb7abe Pin claude hooks and preserve bash wrappers
+- d725fd7d fix: preserve terminal clipboard rich text and image fallbacks
+- 8ee52287 Preserve PR cache across preexec
+- c0702050 Send AX committed text as typed input
+- 89e78a97 Handle claude aliases in shell integrations
+- 73ad5ed3 Add regression test for AX insertText typing semantics
+- 91aacb9e Stop parent zsh watcher in nested shells
+- 2c56ba1a Fix macOS 26 glass window gating (#2459)
+- 484c95cd Handle C1 CSI in committed text sanitizer
+- 4453a687 wook
+- 5ba224d9 Add regression test for C1 CSI committed text
+- a1bea761 Fix paste from Raycast and other apps using alternate plain-text UTIs
+- 5ef91dd6 Fix shell integration review regressions
+- 9f34443f Preserve automation control bytes in committed text
+- be6db5a0 Add regression test for automation committed text
+- de5b1e9a Keep claude wrapper ahead of PATH changes
+- 12efe0eb Add regression test for claude shell wrapper dispatch
+- 4ac8a2e3 Fix Speakly escape leak on text insertion
+- 5642bb12 wok
+- a00b46ce Fix zsh EPOCHSECONDS fallback
+- 617ae656 Preserve web search verbose status
+- 3bc9b759 Restore idle PR refresh cadence
+- 20532b25 Address review regressions
+- 47c50458 Make sidebar PR lookups event-driven
+- 5bea6558 Fix hook payload compaction build
+- a7c07928 Fix Claude VM node OOM guard
+- c778946c Fix CLI focus-steal policy
+- 92d4fa68 Add SSH, Claude Code Teams, browser import, custom commands to README (#2445)
+- 5835bff1 Update claude-teams blog: link to Claude docs, mention auto env setup (#2426)
+- 51fe28e4 Add cmux SSH blog post (#2377)
+- e2e5f87b Cache Zig package downloads in CI to prevent TLS flakes (#2423)
+- 02e5ef94 Localize tab context menu and alert strings (#1998)
+- acd45bbd Remove copy-on-select setting
+- 3666f48a Scope sidebar row observation to visible workspace state
+
 ## Sync 2026-03-17 14:51 UTC — 44 commits from upstream
 
 - 8d8fadbb Add hidden CLI command for live terminal debugging (#1599)
