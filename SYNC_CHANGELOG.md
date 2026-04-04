@@ -1,3 +1,56 @@
+## Sync 2026-04-04 07:05 UTC — 484 commits from upstream
+
+- 6a412fd2 fix: harden ssh localcommand escaping
+- cebcacac Fix missing sidebar ports for agent-run dev servers (#2562)
+- 10b77abb fix: harden deferred ssh reconnect handling
+- b1f282f6 Reuse SSH control master for remote relay
+- c1b8a5c4 Fix missing sidebar git branch metadata for workspaces (#2563)
+- 3758d750 Find Homebrew go for dev remote bootstrap
+- f4846730 Support chorded keyboard shortcuts (#2528)
+- c014f319 Fix session restore terminal cursor focus race (#2471)
+- 8e2ca87a Defer remote bootstrap until SSH auth succeeds
+- a097bcfe Add SSH foreground-auth regression tests
+- 552747a8 Detect listening ports for remote SSH workspaces (#2398)
+- 4fb5c231 Add editable workspace descriptions (#2475)
+- 26ffcf12 test: clarify korean IME regression naming
+- 14ca576c fix: suppress fallback text during IME composition
+- a69bdc69 test: cover korean IME composing text leak
+- ea7d8fe9 fix: fall back to focused surface when new-split target is stale
+- 08fd53eb fix: require divider-origin fast resize
+- 401ffb16 fix: scope split divider drags to one mouse gesture
+- 41ed8b68 Add Claude Binary Path setting (#2514)
+- 2dbb8c29 Avoid duplicate browser portal sync during split drag
+- d4c1ef25 Add GitHub stars badge to translated READMEs
+- 3d889fe0 Keep GitHub stars badge stable across navigation (#2476)
+- dc16b3bd Fix GitHub star badge formatting (#2473)
+- b71d6fbc Fix external insertText escape handling
+- 88e5b07b Fix web header overlap (#2452)
+- 8258459a Preserve symlink aliases for external opens
+- ac1bf555 Add regression tests for symlinked external opens
+- 7a2e9b68 Make Tahoe glass teardown reversible (#2459)
+- 00b4810e Harden bash nested-shell review coverage
+- adfb7abe Pin claude hooks and preserve bash wrappers
+- d725fd7d fix: preserve terminal clipboard rich text and image fallbacks
+- 8ee52287 Preserve PR cache across preexec
+- c0702050 Send AX committed text as typed input
+- 89e78a97 Handle claude aliases in shell integrations
+- 73ad5ed3 Add regression test for AX insertText typing semantics
+- 91aacb9e Stop parent zsh watcher in nested shells
+- 2c56ba1a Fix macOS 26 glass window gating (#2459)
+- 484c95cd Handle C1 CSI in committed text sanitizer
+- 4453a687 wook
+- 5ba224d9 Add regression test for C1 CSI committed text
+- a1bea761 Fix paste from Raycast and other apps using alternate plain-text UTIs
+- 5ef91dd6 Fix shell integration review regressions
+- 9f34443f Preserve automation control bytes in committed text
+- be6db5a0 Add regression test for automation committed text
+- de5b1e9a Keep claude wrapper ahead of PATH changes
+- 12efe0eb Add regression test for claude shell wrapper dispatch
+- 4ac8a2e3 Fix Speakly escape leak on text insertion
+- 5642bb12 wok
+- a00b46ce Fix zsh EPOCHSECONDS fallback
+- 617ae656 Preserve web search verbose status
+
 ## Sync 2026-03-17 14:51 UTC — 44 commits from upstream
 
 - 8d8fadbb Add hidden CLI command for live terminal debugging (#1599)
