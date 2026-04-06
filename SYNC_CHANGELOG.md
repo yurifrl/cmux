@@ -1,3 +1,56 @@
+## Sync 2026-04-06 07:48 UTC — 520 commits from upstream
+
+- de3e34bf Fix terminals freezing when first responder drifts (#2505)
+- dbcb2889 Suppress cmd-hover path highlighting while terminal selection is active (#2579)
+- d6853e12 test: buffer pty output incrementally
+- 4cbee675 test: fail fast in pty zsh helper
+- c9fa79fd test: drive zsh handoff through a pty
+- 468ced0b fix: restore zsh term in preexec
+- 225b492e test: cover zsh preexec term restore
+- 5c1567d7 fix: stop swallowing ABC-QWERTZ / and ? in terminal input (#2447)
+- 8211f339 fix: honor user zshenv integration disables
+- 6a32f835 test: cover user zshenv integration disable
+- d4194e9b fix: suppress missing zle hook noise
+- 9583579c fix: guard zsh term spoof and sync ghostty fork docs
+- af6a3adb test: cover zsh term handoff edge cases
+- 48f18958 fix: restore GhosttyKit-compatible submodule pointers
+- b13e332f fix: drop unsupported Ghostty focus seed
+- a3172f1b fix: keep prompt colors with xterm-256color
+- cdccc56c test: cover zsh startup term handoff
+- b98a7cec Fix multi-split resize follow-up regressions
+- 7a89bec1 Pin GhosttyKit checksum for merged ghostty SHA
+- 58e5b342 Commit Ghostty focus-reporting fix and sync guard
+- 2bf43677 Fix sidebar layout loop and CLI socket deadlocks (#2601)
+- 6a412fd2 fix: harden ssh localcommand escaping
+- cebcacac Fix missing sidebar ports for agent-run dev servers (#2562)
+- c512d716 Fix Ghostty clipboard callback return type
+- 10b77abb fix: harden deferred ssh reconnect handling
+- b1f282f6 Reuse SSH control master for remote relay
+- c1b8a5c4 Fix missing sidebar git branch metadata for workspaces (#2563)
+- 3758d750 Find Homebrew go for dev remote bootstrap
+- 50e5f457 Fix ghostty callback return values
+- 0f159fa7 Correct clipboard callback returns
+- 0dfaddf4 Fix reload build blockers
+- a220086e Fix clipboard callback build break
+- a83cf2eb Suppress nested split portal sync during divider drag
+- f4846730 Support chorded keyboard shortcuts (#2528)
+- c014f319 Fix session restore terminal cursor focus race (#2471)
+- 8e2ca87a Defer remote bootstrap until SSH auth succeeds
+- a097bcfe Add SSH foreground-auth regression tests
+- 552747a8 Detect listening ports for remote SSH workspaces (#2398)
+- 4fb5c231 Add editable workspace descriptions (#2475)
+- 26ffcf12 test: clarify korean IME regression naming
+- 14ca576c fix: suppress fallback text during IME composition
+- a69bdc69 test: cover korean IME composing text leak
+- ea7d8fe9 fix: fall back to focused surface when new-split target is stale
+- 08fd53eb fix: require divider-origin fast resize
+- 401ffb16 fix: scope split divider drags to one mouse gesture
+- 41ed8b68 Add Claude Binary Path setting (#2514)
+- 2aa1325b Fix focus reporting leak: seed initial focus state in Ghostty surface config
+- 2dbb8c29 Avoid duplicate browser portal sync during split drag
+- d4c1ef25 Add GitHub stars badge to translated READMEs
+- 3d889fe0 Keep GitHub stars badge stable across navigation (#2476)
+
 ## Sync 2026-03-17 14:51 UTC — 44 commits from upstream
 
 - 8d8fadbb Add hidden CLI command for live terminal debugging (#1599)
