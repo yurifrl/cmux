@@ -1,3 +1,56 @@
+## Sync 2026-04-07 07:23 UTC — 583 commits from upstream
+
+- 0bbaa48a Configurable surface tab bar font size (#2645)
+- 7563c910 fix: restore shortcut default and validate bypassed settings paths
+- 45989a0e guardrail: require settings.json review for settings rows
+- 91b48505 ci: only enforce Sparkle monotonic check on release (#2651)
+- 5422a4bd Fix sidebar PR status polling rate limits (#2585)
+- 179b16ce Bump CURRENT_PROJECT_VERSION to 79 to fix Sparkle update path; add monotonic guard (#2625)
+- f9e1ab40 Bump version to 0.63.2 (#2624)
+- e9a0596f Add cmux omx and cmux omc agent integrations (#2619)
+- d4ff28dd fix: add missing locale entries and portal resync on toggle (#2622)
+- efc759ec fix: DevTools pane breaks after workspace switch round-trips (#2621)
+- 8249939a build: use xcrun ranlib for GhosttyKit repair
+- 769f08c0 build: refresh GhosttyKit archive index
+- f56723b1 fix: keep latest notification until explicit clear
+- bd54c396 test: keep latest notification after mark read
+- 483de84e fix: hide react grab session tokens from page scripts
+- 4d64aed8 fix: refresh active react grab round-trip tokens
+- 8d2aec72 fix: tighten react grab review follow-ups
+- 430884be fix: address React Grab review follow-ups
+- de3e34bf Fix terminals freezing when first responder drifts (#2505)
+- c28b8a0d fix react grab shortcut when webview focus is deferred
+- 9d642113 test: cover deferred webview focus for react grab shortcut
+- 5d7a09fa fix react grab target surviving url sync
+- 9b8cf46f test: cover react grab reset preserving pasteback
+- 489fb0cc fix react grab pasteback after deactivate
+- 30fb089f test: cover react grab deactivate-before-copy order
+- 5eb20163 debug react grab pasteback round-trip
+- dbcb2889 Suppress cmd-hover path highlighting while terminal selection is active (#2579)
+- 45457947 fix react grab terminal pasteback target
+- a29f39f6 test: cover react grab terminal pasteback target
+- a84026f4 fix React Grab terminal round-trip
+- 08d17ac8 test: expect Cmd-Shift-G for React Grab
+- d6853e12 test: buffer pty output incrementally
+- 4cbee675 test: fail fast in pty zsh helper
+- c9fa79fd test: drive zsh handoff through a pty
+- 468ced0b fix: restore zsh term in preexec
+- 225b492e test: cover zsh preexec term restore
+- 5c1567d7 fix: stop swallowing ABC-QWERTZ / and ? in terminal input (#2447)
+- 8211f339 fix: honor user zshenv integration disables
+- 6a32f835 test: cover user zshenv integration disable
+- d4194e9b fix: suppress missing zle hook noise
+- 9583579c fix: guard zsh term spoof and sync ghostty fork docs
+- af6a3adb test: cover zsh term handoff edge cases
+- 48f18958 fix: restore GhosttyKit-compatible submodule pointers
+- b13e332f fix: drop unsupported Ghostty focus seed
+- a3172f1b fix: keep prompt colors with xterm-256color
+- cdccc56c test: cover zsh startup term handoff
+- b98a7cec Fix multi-split resize follow-up regressions
+- 7a89bec1 Pin GhosttyKit checksum for merged ghostty SHA
+- 58e5b342 Commit Ghostty focus-reporting fix and sync guard
+- 2bf43677 Fix sidebar layout loop and CLI socket deadlocks (#2601)
+
 ## Sync 2026-03-17 14:51 UTC — 44 commits from upstream
 
 - 8d8fadbb Add hidden CLI command for live terminal debugging (#1599)
