@@ -1,3 +1,56 @@
+## Sync 2026-04-08 07:25 UTC — 613 commits from upstream
+
+- 1a055555 Add GhosttyKit checksum for 3b684a08 (origin/main with all patches)
+- 4bad2da6 Update ghostty to origin/main with all cmux patches
+- f45c8f48 Add GhosttyKit checksum for fc59b46b (zig 0.15.2 compat)
+- db5a920e Update ghostty submodule with zig 0.15.2 compat fix
+- 5702a7f7 Add GhosttyKit checksum for 811360c5 (cli-helper step)
+- c9e3ccb3 Update ghostty submodule with cli-helper step
+- cc9dee52 Add GhosttyKit checksum for 9fa02f69 (xcframework tag fix)
+- 2b3d1c17 Update ghostty submodule with xcframework tag fix
+- 044ff84d Add GhosttyKit checksum for cc6f4c28 (upstream merge)
+- 0aedcfdd Update ghostty submodule to merged upstream (ghostty PR #30)
+- 9692022c Update ghostty submodule to upstream main (112 commits past v1.3.1)
+- b90c41f5 Revert "Add passkey, WebAuthn, and FIDO2 support to browser pane (#2660)"
+- 2e0f9d43 Revert "Fix nightly codesign: sign nested plugins and frameworks before outer app (#2676)"
+- f441a39d Revert "Merge pull request #2677 from manaflow-ai/fix-nightly-codesign-dock-tile-plugin"
+- c3f5f04f Revert "Merge pull request #2679 from manaflow-ai/fix-codesign-autoupdate"
+- c6ef4e75 Revert "Merge pull request #2680 from manaflow-ai/fix-codesign-path-filter"
+- e2d5cff1 Fix codesign: -path '*.app/*' excluded everything inside outer .app
+- 1a2624a7 Fix codesign: drop -perm filter so Sparkle Autoupdate gets signed
+- 18d9fca6 Fix codesign: three-pass signing for Sparkle nested executables
+- 9412c790 Fix nightly codesign: sign nested plugins and frameworks before outer app (#2676)
+- 266a0429 Coalesce sidebar PR polling per-repo, drop checks fetch, state-machine the probe queue (#2662)
+- fe7e2920 Hide workspace portal content before teardown (#2658)
+- 9d4220b1 Fix workspace color picker context menu blinking (#2566)
+- f550206f Add passkey, WebAuthn, and FIDO2 support to browser pane (#2660)
+- ed019f5c Add a system-wide hotkey to show and hide cmux windows (#2389)
+- 0bbaa48a Configurable surface tab bar font size (#2645)
+- 7563c910 fix: restore shortcut default and validate bypassed settings paths
+- 45989a0e guardrail: require settings.json review for settings rows
+- 91b48505 ci: only enforce Sparkle monotonic check on release (#2651)
+- 5422a4bd Fix sidebar PR status polling rate limits (#2585)
+- 179b16ce Bump CURRENT_PROJECT_VERSION to 79 to fix Sparkle update path; add monotonic guard (#2625)
+- f9e1ab40 Bump version to 0.63.2 (#2624)
+- e9a0596f Add cmux omx and cmux omc agent integrations (#2619)
+- d4ff28dd fix: add missing locale entries and portal resync on toggle (#2622)
+- efc759ec fix: DevTools pane breaks after workspace switch round-trips (#2621)
+- 8249939a build: use xcrun ranlib for GhosttyKit repair
+- 769f08c0 build: refresh GhosttyKit archive index
+- f56723b1 fix: keep latest notification until explicit clear
+- bd54c396 test: keep latest notification after mark read
+- 483de84e fix: hide react grab session tokens from page scripts
+- 4d64aed8 fix: refresh active react grab round-trip tokens
+- 8d2aec72 fix: tighten react grab review follow-ups
+- 430884be fix: address React Grab review follow-ups
+- de3e34bf Fix terminals freezing when first responder drifts (#2505)
+- c28b8a0d fix react grab shortcut when webview focus is deferred
+- 9d642113 test: cover deferred webview focus for react grab shortcut
+- 5d7a09fa fix react grab target surviving url sync
+- 9b8cf46f test: cover react grab reset preserving pasteback
+- 489fb0cc fix react grab pasteback after deactivate
+- 30fb089f test: cover react grab deactivate-before-copy order
+
 ## Sync 2026-03-17 14:51 UTC — 44 commits from upstream
 
 - 8d8fadbb Add hidden CLI command for live terminal debugging (#1599)
