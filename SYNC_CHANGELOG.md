@@ -1,3 +1,56 @@
+## Sync 2026-04-12 07:19 UTC — 653 commits from upstream
+
+- 8eb74560 fix(config): allow symlinked Ghostty config files
+- 1930da57 test(config): cover symlinked Ghostty config loading
+- c77d2bda Trim trailing punctuation from cmd-click paths
+- 596b5a60 Add failing cmd-click punctuation tests
+- 4f1aee64 Skip browser paste preflight when cache is false
+- 3d0e2f11 Broaden browser plain-text paste gating
+- 1ffe4864 Fix browser omnibar field editor focus tracking
+- e8d726d6 Avoid duplicate browser paste preflight
+- 66f7b596 Fix browser omnibar shortcut routing edge cases
+- 45a51795 Use WebKit native plain-text browser paste
+- 918de063 Address browser paste review follow-ups
+- 224c01d1 Fix browser address bar shortcut focus routing
+- 9b258884 Narrow command focus repair for menu shortcuts
+- 52c83fdc Refresh bonsplit pointer and ghostty fork notes
+- 221529a8 Fix browser paste focus handler issues
+- 5a30a91a Share browser JS literal helper
+- 14a5b1dc Repair command-key focus drift in same window
+- 39b081aa Fix browser plain-text paste review issues
+- 8e3c15f3 Route browser up/down arrows through keyDown
+- 27f61e51 Fix browser arrow key routing
+- eabe056a Finish Raycast paste regression fix
+- 95973a93 Fix shell integration not injected — Ghostty ZDOTDIR override
+- 85dfc265 Fix browser paste-as-plain-text shortcut
+- f8dfdefa Fix command-hold shortcut hints and keep sidebar text stable
+- 9b4e447e Fix Raycast paste fallback regression
+- 8510503d Fix minimal-mode traffic-light inset on new workspace
+- c2e97bea Add Cursor and Gemini CLI agent integrations + setup-hooks (#2717)
+- 1d81b749 Add founder's edition
+- d576d913 Fix selection autoscroll past terminal viewport edge (#2705)
+- 1a055555 Add GhosttyKit checksum for 3b684a08 (origin/main with all patches)
+- 4bad2da6 Update ghostty to origin/main with all cmux patches
+- f45c8f48 Add GhosttyKit checksum for fc59b46b (zig 0.15.2 compat)
+- db5a920e Update ghostty submodule with zig 0.15.2 compat fix
+- 5702a7f7 Add GhosttyKit checksum for 811360c5 (cli-helper step)
+- c9e3ccb3 Update ghostty submodule with cli-helper step
+- cc9dee52 Add GhosttyKit checksum for 9fa02f69 (xcframework tag fix)
+- 2b3d1c17 Update ghostty submodule with xcframework tag fix
+- 044ff84d Add GhosttyKit checksum for cc6f4c28 (upstream merge)
+- 0aedcfdd Update ghostty submodule to merged upstream (ghostty PR #30)
+- 9692022c Update ghostty submodule to upstream main (112 commits past v1.3.1)
+- b90c41f5 Revert "Add passkey, WebAuthn, and FIDO2 support to browser pane (#2660)"
+- 2e0f9d43 Revert "Fix nightly codesign: sign nested plugins and frameworks before outer app (#2676)"
+- f441a39d Revert "Merge pull request #2677 from manaflow-ai/fix-nightly-codesign-dock-tile-plugin"
+- c3f5f04f Revert "Merge pull request #2679 from manaflow-ai/fix-codesign-autoupdate"
+- c6ef4e75 Revert "Merge pull request #2680 from manaflow-ai/fix-codesign-path-filter"
+- e2d5cff1 Fix codesign: -path '*.app/*' excluded everything inside outer .app
+- 1a2624a7 Fix codesign: drop -perm filter so Sparkle Autoupdate gets signed
+- c4a08fb2 Fix terminal scrollbar occlusion
+- 18d9fca6 Fix codesign: three-pass signing for Sparkle nested executables
+- 9412c790 Fix nightly codesign: sign nested plugins and frameworks before outer app (#2676)
+
 ## Sync 2026-03-17 14:51 UTC — 44 commits from upstream
 
 - 8d8fadbb Add hidden CLI command for live terminal debugging (#1599)
