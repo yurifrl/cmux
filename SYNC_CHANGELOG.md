@@ -1,3 +1,56 @@
+## Sync 2026-04-14 07:51 UTC — 668 commits from upstream
+
+- 6a64de4a Revert "Refactor app icon appearance handling (#2876)" (#2883)
+- d3d038fd fix: prune old nightly release assets (#2882)
+- 520b550b Refactor app icon appearance handling (#2876)
+- fffc8eff Fix flaky FileExplorerStoreTests (macOS Compatibility) (#2880)
+- 9c051907 chore: stop tracking node_modules
+- 151075f7 Avoid character APIs in flagsChanged
+- ab46c557 Handle left-side modifier releases
+- 6d7bbd23 Add file explorer sidebar with SSH support, git status, and visual styles (#1963)
+- fda8daad Fix modifier release handling after idle
+- 05ab5943 Fix paste only pasting first character (#2805)
+- c9d3c6b7 Fix blank split panes after portal reveal
+- 8eb74560 fix(config): allow symlinked Ghostty config files
+- 1930da57 test(config): cover symlinked Ghostty config loading
+- c77d2bda Trim trailing punctuation from cmd-click paths
+- 596b5a60 Add failing cmd-click punctuation tests
+- 4f1aee64 Skip browser paste preflight when cache is false
+- 3d0e2f11 Broaden browser plain-text paste gating
+- 1ffe4864 Fix browser omnibar field editor focus tracking
+- e8d726d6 Avoid duplicate browser paste preflight
+- 66f7b596 Fix browser omnibar shortcut routing edge cases
+- 45a51795 Use WebKit native plain-text browser paste
+- 918de063 Address browser paste review follow-ups
+- 224c01d1 Fix browser address bar shortcut focus routing
+- 9b258884 Narrow command focus repair for menu shortcuts
+- 52c83fdc Refresh bonsplit pointer and ghostty fork notes
+- 221529a8 Fix browser paste focus handler issues
+- 5a30a91a Share browser JS literal helper
+- 14a5b1dc Repair command-key focus drift in same window
+- 39b081aa Fix browser plain-text paste review issues
+- 8e3c15f3 Route browser up/down arrows through keyDown
+- 27f61e51 Fix browser arrow key routing
+- eabe056a Finish Raycast paste regression fix
+- 95973a93 Fix shell integration not injected — Ghostty ZDOTDIR override
+- 85dfc265 Fix browser paste-as-plain-text shortcut
+- f8dfdefa Fix command-hold shortcut hints and keep sidebar text stable
+- 9b4e447e Fix Raycast paste fallback regression
+- 8510503d Fix minimal-mode traffic-light inset on new workspace
+- c2e97bea Add Cursor and Gemini CLI agent integrations + setup-hooks (#2717)
+- 1d81b749 Add founder's edition
+- d576d913 Fix selection autoscroll past terminal viewport edge (#2705)
+- 1a055555 Add GhosttyKit checksum for 3b684a08 (origin/main with all patches)
+- 4bad2da6 Update ghostty to origin/main with all cmux patches
+- f45c8f48 Add GhosttyKit checksum for fc59b46b (zig 0.15.2 compat)
+- db5a920e Update ghostty submodule with zig 0.15.2 compat fix
+- 5702a7f7 Add GhosttyKit checksum for 811360c5 (cli-helper step)
+- c9e3ccb3 Update ghostty submodule with cli-helper step
+- cc9dee52 Add GhosttyKit checksum for 9fa02f69 (xcframework tag fix)
+- 2b3d1c17 Update ghostty submodule with xcframework tag fix
+- 044ff84d Add GhosttyKit checksum for cc6f4c28 (upstream merge)
+- 0aedcfdd Update ghostty submodule to merged upstream (ghostty PR #30)
+
 ## Sync 2026-03-17 14:51 UTC — 44 commits from upstream
 
 - 8d8fadbb Add hidden CLI command for live terminal debugging (#1599)
