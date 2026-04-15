@@ -330,8 +330,10 @@ indirect enum SessionWorkspaceLayoutSnapshot: Codable, Sendable {
 struct SessionWorkspaceSnapshot: Codable, Sendable {
     var processTitle: String
     var customTitle: String?
+    var customDescription: String?
     var customColor: String?
     var isPinned: Bool
+    var terminalScrollBarHidden: Bool?
     var currentDirectory: String
     var focusedPanelId: UUID?
     var layout: SessionWorkspaceLayoutSnapshot
@@ -377,14 +379,21 @@ enum SessionPersistenceStore {
         let directory = fileURL.deletingLastPathComponent()
         do {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: nil)
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = [.sortedKeys]
-            let data = try encoder.encode(snapshot)
+            let data = try encodedSnapshotData(snapshot)
+            if let existingData = try? Data(contentsOf: fileURL), existingData == data {
+                return true
+            }
             try data.write(to: fileURL, options: .atomic)
             return true
         } catch {
             return false
         }
+    }
+
+    private static func encodedSnapshotData(_ snapshot: AppSessionSnapshot) throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        return try encoder.encode(snapshot)
     }
 
     static func removeSnapshot(fileURL: URL? = nil) {
