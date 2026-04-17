@@ -1,3 +1,56 @@
+## Sync 2026-04-17 07:52 UTC — 719 commits from upstream
+
+- 3856ffaa Address remaining scrollback review feedback
+- 8ec3a86a Address PR review feedback
+- b555141a Assert initial_env is also ignored when layout is provided
+- 5a5ef873 Add test for layout taking precedence over initial_command and initial_env
+- 50e722fe Remove extraneous f-string prefix (Ruff F541)
+- a7276db4 Tighten CLI --layout check to require a JSON object, not array or string
+- cfe8788f Use explicit surface_id when sending text in env var test
+- 87281183 Assert no workspace created when empty surfaces are rejected
+- f3c0eca7 Log cleanup failures instead of silently swallowing exceptions
+- 1918256d Add socket test for workspace.create layout parameter
+- fc9399c6 Add layout parameter to workspace.create socket API and CLI
+- 63180edc Route Cmd-clicked .md files to cmux markdown viewer
+- c5f2e8c1 Refactor cmux bundle signing into a shared script with checked-in entitlements (#2908)
+- 5b126b9b Fix scrollback limit handling
+- 02f741c3 Inside-out signing with per-binary entitlements to restore passkeys (#2905)
+- 10859270 Revert application-identifier injection in nightly signing (#2902)
+- e14710e8 Passkey / WebAuthn / FIDO2 support in browser pane (fresh implementation) (#2727)
+- 0de573e3 Persist app icon mode on the app bundle (#2884)
+- ae784f5c Address PR review nits for PortScanner leak fix
+- 37dd8bc0 Fix PortScanner subprocess pipe fd leak (#2890)
+- 5f1d1096 Add regression test for PortScanner pipe fd leak (#2890)
+- 6670235f fix(i18n): address review nits for Korean translations
+- 506eec1c fix(i18n): use positional format specifiers for reordered Korean strings
+- a686f146 feat(i18n): complete Korean (ko) localization for macOS app
+- 6a64de4a Revert "Refactor app icon appearance handling (#2876)" (#2883)
+- d3d038fd fix: prune old nightly release assets (#2882)
+- 520b550b Refactor app icon appearance handling (#2876)
+- fffc8eff Fix flaky FileExplorerStoreTests (macOS Compatibility) (#2880)
+- 4d49a7ba fix: prefer UTF-8 plain text in pasteboard to avoid Mac OS Roman loss (#2818)
+- 9c051907 chore: stop tracking node_modules
+- 151075f7 Avoid character APIs in flagsChanged
+- ab46c557 Handle left-side modifier releases
+- da1b45d5 Use canonical terminal scrollbar visibility check
+- 6d7bbd23 Add file explorer sidebar with SSH support, git status, and visual styles (#1963)
+- 09b4bf00 Avoid duplicate scrollbar geometry reconcile
+- fda8daad Fix modifier release handling after idle
+- 05ab5943 Fix paste only pasting first character (#2805)
+- c9d3c6b7 Fix blank split panes after portal reveal
+- 0f1b9e60 Harden Tahoe app icon startup recovery
+- 8eb74560 fix(config): allow symlinked Ghostty config files
+- 1930da57 test(config): cover symlinked Ghostty config loading
+- c77d2bda Trim trailing punctuation from cmd-click paths
+- 596b5a60 Add failing cmd-click punctuation tests
+- 1317682a Refresh sidebar scrollbar menu state
+- 2dbb59af Precompute sidebar scrollbar menu state
+- 4f1aee64 Skip browser paste preflight when cache is false
+- 3d0e2f11 Broaden browser plain-text paste gating
+- 1ffe4864 Fix browser omnibar field editor focus tracking
+- da2b21b4 Keep scrollbar visible until scrollback is known
+- e8d726d6 Avoid duplicate browser paste preflight
+
 ## Sync 2026-03-17 14:51 UTC — 44 commits from upstream
 
 - 8d8fadbb Add hidden CLI command for live terminal debugging (#1599)
