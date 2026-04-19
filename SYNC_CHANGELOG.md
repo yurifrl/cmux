@@ -1,3 +1,56 @@
+## Sync 2026-04-19 07:24 UTC — 749 commits from upstream
+
+- 3698f137 Fix Cmd/Ctrl shortcut hint parity (#2992) (#2994)
+- bd75a031 Sessions popover: also cancel drag on Escape (#2995)
+- 914a5caa Keep LazyVStack virtualization; isolate drag state + Equatable row snapshots (#2970)
+- a5a1cafb Fix close confirmation bypass when spamming close (#2989)
+- 95fa19de Preserve incoming cachePolicy on new-tab navigation seed
+- 54b067e7 Skip init-time insecure HTTP gate when one-shot bypass is seeded
+- 7d37acf4 Address browser PR review feedback
+- 5c866bd4 Fix deferred file-drop overlay installation
+- a90bc548 Honor Ghostty keybindings after paste menu miss
+- 06c6d349 Organize terminal paste fallback regression tests
+- 70618b0f Fix file drop overlay startup installation
+- 1194c396 Tighten terminal paste regression tests
+- b1dd2312 Add regression test for repeated file drop overlay install
+- 3bc13afb Recover Ghostty surface before consuming paste shortcuts
+- 2796ae49 Add regression coverage for paste surface recovery
+- 81052f42 fix: preserve terminal paste when menu shortcut misses
+- e125fc30 test: cover terminal Cmd+V fallback when menu misses
+- b4efe38d Add Sessions panel to right sidebar (#2936)
+- d2aee0f7 reload.sh: always kill same-tag app after a successful build (#2956)
+- cb1a6de8 Fix bilibili search popup opening detached window
+- 479dac9b Add bilibili popup regression coverage
+- 3856ffaa Address remaining scrollback review feedback
+- 8f5114f9 Preserve browser redirect request context
+- d0942232 Add failing browser redirect handoff test
+- 8ec3a86a Address PR review feedback
+- b555141a Assert initial_env is also ignored when layout is provided
+- 5a5ef873 Add test for layout taking precedence over initial_command and initial_env
+- 50e722fe Remove extraneous f-string prefix (Ruff F541)
+- a7276db4 Tighten CLI --layout check to require a JSON object, not array or string
+- cfe8788f Use explicit surface_id when sending text in env var test
+- 87281183 Assert no workspace created when empty surfaces are rejected
+- f3c0eca7 Log cleanup failures instead of silently swallowing exceptions
+- 1918256d Add socket test for workspace.create layout parameter
+- fc9399c6 Add layout parameter to workspace.create socket API and CLI
+- 63180edc Route Cmd-clicked .md files to cmux markdown viewer
+- c5f2e8c1 Refactor cmux bundle signing into a shared script with checked-in entitlements (#2908)
+- 5b126b9b Fix scrollback limit handling
+- 02f741c3 Inside-out signing with per-binary entitlements to restore passkeys (#2905)
+- 10859270 Revert application-identifier injection in nightly signing (#2902)
+- e14710e8 Passkey / WebAuthn / FIDO2 support in browser pane (fresh implementation) (#2727)
+- 0de573e3 Persist app icon mode on the app bundle (#2884)
+- ae784f5c Address PR review nits for PortScanner leak fix
+- 37dd8bc0 Fix PortScanner subprocess pipe fd leak (#2890)
+- 5f1d1096 Add regression test for PortScanner pipe fd leak (#2890)
+- 6670235f fix(i18n): address review nits for Korean translations
+- 506eec1c fix(i18n): use positional format specifiers for reordered Korean strings
+- a686f146 feat(i18n): complete Korean (ko) localization for macOS app
+- 6a64de4a Revert "Refactor app icon appearance handling (#2876)" (#2883)
+- d3d038fd fix: prune old nightly release assets (#2882)
+- 520b550b Refactor app icon appearance handling (#2876)
+
 ## Sync 2026-03-17 14:51 UTC — 44 commits from upstream
 
 - 8d8fadbb Add hidden CLI command for live terminal debugging (#1599)
