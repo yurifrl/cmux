@@ -50,7 +50,7 @@ private class BrowserPopupPanel: NSPanel {
         // Cmd+W: close this popup panel only
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         if flags == .command,
-           event.charactersIgnoringModifiers == "w" {
+           KeyboardLayout.normalizedCharacters(for: event) == "w" {
             #if DEBUG
             dlog("popup.panel.cmdW close")
             #endif
@@ -67,6 +67,7 @@ final class BrowserPopupWindowController: NSObject, NSWindowDelegate {
     static let maxNestingDepth = 3
 
     let webView: CmuxWebView
+    private let browserContext: BrowserPopupBrowserContext
     private let panel: NSPanel
     private let urlLabel: NSTextField
     private weak var openerPanel: BrowserPanel?
@@ -78,29 +79,42 @@ final class BrowserPopupWindowController: NSObject, NSWindowDelegate {
     private let popupUIDelegate: PopupUIDelegate
     private let popupNavigationDelegate: PopupNavigationDelegate
     private let downloadDelegate: BrowserDownloadDelegate
+    private let webAuthnCoordinator: BrowserWebAuthnCoordinator
 
     private static var associatedObjectKey: UInt8 = 0
 
     init(
         configuration: WKWebViewConfiguration,
         windowFeatures: WKWindowFeatures,
+        browserContext: BrowserPopupBrowserContext,
         openerPanel: BrowserPanel?,
         parentPopupController: BrowserPopupWindowController? = nil,
         nestingDepth: Int = 0
     ) {
+        self.browserContext = browserContext
         self.openerPanel = openerPanel
         self.parentPopupController = parentPopupController
         self.nestingDepth = nestingDepth
 
-        // Create popup web view with WebKit's supplied configuration (preserves
-        // internal browsing-context state for opener linkage / postMessage).
+        BrowserPanel.configureWebViewConfiguration(
+            configuration,
+            websiteDataStore: browserContext.websiteDataStore,
+            processPool: browserContext.processPool
+        )
+
+        // Create popup web view with WebKit's supplied configuration after
+        // overlaying the opener's browser context so OAuth popups keep cmux's
+        // shared cookie/storage scope and opener linkage.
         let webView = CmuxWebView(frame: .zero, configuration: configuration)
         webView.allowsBackForwardNavigationGestures = true
         if #available(macOS 13.3, *) {
             webView.isInspectable = true
         }
+        webView.underPageBackgroundColor = GhosttyBackgroundTheme.currentColor()
         webView.customUserAgent = BrowserUserAgentSettings.safariUserAgent
+        BrowserThemeSettings.apply(openerPanel?.currentBrowserThemeMode ?? BrowserThemeSettings.mode(), to: webView)
         self.webView = webView
+        self.webAuthnCoordinator = BrowserWebAuthnCoordinator()
 
         // --- Window sizing from WKWindowFeatures ---
         let defaultWidth: CGFloat = 800
@@ -193,6 +207,7 @@ final class BrowserPopupWindowController: NSObject, NSWindowDelegate {
         navDel.downloadDelegate = dlDel
         webView.uiDelegate = uiDel
         webView.navigationDelegate = navDel
+        webAuthnCoordinator.install(on: webView)
 
         // Context menu "Open Link in New Tab" → open in opener's workspace,
         // not as a nested popup. Falls back to system browser if opener is gone.
@@ -240,6 +255,13 @@ final class BrowserPopupWindowController: NSObject, NSWindowDelegate {
         childPopups.removeAll { $0 === child }
     }
 
+    func setBrowserThemeMode(_ mode: BrowserThemeMode) {
+        BrowserThemeSettings.apply(mode, to: webView)
+        for child in childPopups {
+            child.setBrowserThemeMode(mode)
+        }
+    }
+
     // MARK: - Popup lifecycle
 
     func closePopup() {
@@ -271,6 +293,7 @@ final class BrowserPopupWindowController: NSObject, NSWindowDelegate {
         urlObservation = nil
 
         // Tear down web view
+        webAuthnCoordinator.uninstall(from: webView)
         webView.stopLoading()
         webView.navigationDelegate = nil
         webView.uiDelegate = nil
@@ -299,6 +322,7 @@ final class BrowserPopupWindowController: NSObject, NSWindowDelegate {
         let child = BrowserPopupWindowController(
             configuration: configuration,
             windowFeatures: windowFeatures,
+            browserContext: browserContext,
             openerPanel: openerPanel,
             parentPopupController: self,
             nestingDepth: nextDepth
@@ -307,10 +331,10 @@ final class BrowserPopupWindowController: NSObject, NSWindowDelegate {
         return child.webView
     }
 
-    func openInOpenerTab(_ url: URL) {
+    func openInOpenerTab(_ request: URLRequest) {
         if let openerPanel {
-            openerPanel.openLinkInNewTab(url: url)
-        } else {
+            openerPanel.openLinkInNewTab(request: request)
+        } else if let url = request.url {
             NSWorkspace.shared.open(url)
         }
     }
@@ -406,8 +430,8 @@ private class PopupUIDelegate: NSObject, WKUIDelegate {
             )
         }
 
-        if let url = navigationAction.request.url {
-            controller?.openInOpenerTab(url)
+        if navigationAction.request.url != nil {
+            controller?.openInOpenerTab(navigationAction.request)
         }
         return nil
     }

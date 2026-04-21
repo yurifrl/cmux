@@ -1,3 +1,56 @@
+## Sync 2026-04-21 07:57 UTC — 763 commits from upstream
+
+- 1a95cbba Explain shortcut recorder rejections inline (fixes #2988) (#3035)
+- 0eed21c3 Use workspace color for selected sidebar rows (#3038)
+- 0bdf6949 Fix terminal blanking after OSC completion notifications (#3048)
+- fd93a7c8 web: give the Stack Auth handler layout the site's Geist fonts (#3043)
+- 27e860f0 Trim Stack Auth env values before StackServerApp (#3041)
+- 3885a0b5 Add unified config settings utility window (#3024)
+- 92769d74 Fix DebugEventLog NSFileHandle ObjC exception crash (#3034)
+- d56cf9bc Bring minimal macOS auth scaffolding to main (#3027)
+- 1bfb2266 Pin regular-weight Japanese auto-fallback face (#3015)
+- 3af1173a Fix 100% CPU from ContentView publisher feedback loop (fixes #3020) (#3028)
+- e9768936 Serialize xcodebuild and fetch prebuilt GhosttyKit to unblock Xcode 26 builds (#2981)
+- 8ff5f77f Fix #3011 blank terminal after workspace selection (#3012)
+- 6fe581ef Fix sessions panel CPU loop on nightly (#3013)
+- cd0eb467 Speed up large terminal pastes (#2940) (#3000)
+- 3698f137 Fix Cmd/Ctrl shortcut hint parity (#2992) (#2994)
+- bd75a031 Sessions popover: also cancel drag on Escape (#2995)
+- 914a5caa Keep LazyVStack virtualization; isolate drag state + Equatable row snapshots (#2970)
+- a5a1cafb Fix close confirmation bypass when spamming close (#2989)
+- 95fa19de Preserve incoming cachePolicy on new-tab navigation seed
+- 54b067e7 Skip init-time insecure HTTP gate when one-shot bypass is seeded
+- 7d37acf4 Address browser PR review feedback
+- 5c866bd4 Fix deferred file-drop overlay installation
+- a90bc548 Honor Ghostty keybindings after paste menu miss
+- 06c6d349 Organize terminal paste fallback regression tests
+- 70618b0f Fix file drop overlay startup installation
+- 1194c396 Tighten terminal paste regression tests
+- b1dd2312 Add regression test for repeated file drop overlay install
+- 3bc13afb Recover Ghostty surface before consuming paste shortcuts
+- 2796ae49 Add regression coverage for paste surface recovery
+- 81052f42 fix: preserve terminal paste when menu shortcut misses
+- e125fc30 test: cover terminal Cmd+V fallback when menu misses
+- b4efe38d Add Sessions panel to right sidebar (#2936)
+- d2aee0f7 reload.sh: always kill same-tag app after a successful build (#2956)
+- cb1a6de8 Fix bilibili search popup opening detached window
+- 479dac9b Add bilibili popup regression coverage
+- 3856ffaa Address remaining scrollback review feedback
+- 8f5114f9 Preserve browser redirect request context
+- d0942232 Add failing browser redirect handoff test
+- 8ec3a86a Address PR review feedback
+- b555141a Assert initial_env is also ignored when layout is provided
+- 5a5ef873 Add test for layout taking precedence over initial_command and initial_env
+- 50e722fe Remove extraneous f-string prefix (Ruff F541)
+- a7276db4 Tighten CLI --layout check to require a JSON object, not array or string
+- cfe8788f Use explicit surface_id when sending text in env var test
+- 87281183 Assert no workspace created when empty surfaces are rejected
+- f3c0eca7 Log cleanup failures instead of silently swallowing exceptions
+- 1918256d Add socket test for workspace.create layout parameter
+- fc9399c6 Add layout parameter to workspace.create socket API and CLI
+- 63180edc Route Cmd-clicked .md files to cmux markdown viewer
+- c5f2e8c1 Refactor cmux bundle signing into a shared script with checked-in entitlements (#2908)
+
 ## Sync 2026-03-17 14:51 UTC — 44 commits from upstream
 
 - 8d8fadbb Add hidden CLI command for live terminal debugging (#1599)
