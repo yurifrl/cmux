@@ -10,31 +10,47 @@ Run the setup script to initialize submodules and build GhosttyKit:
 
 ## Local dev
 
-After making code changes, always run the reload script with a tag to launch the Debug app:
+After making code changes, always run the reload script with a tag to build the Debug app:
 
 ```bash
 ./scripts/reload.sh --tag fix-zsh-autosuggestions
 ```
 
-When reporting a tagged reload result in chat, use the format for your agent type:
+By default, `reload.sh` builds but does **not** launch the app. The script prints the `.app` path so the user can cmd-click to open it. After a successful build, it always terminates any running app with the same tag (so cmd-clicking launches the freshly-built binary instead of foregrounding the stale instance). Pass `--launch` to open the app automatically after the build:
 
-**Claude Code** (markdown link with correct derived-data path, cmd+clickable):
+```bash
+./scripts/reload.sh --tag fix-zsh-autosuggestions --launch
+```
+
+`reload.sh` prints an `App path:` line with the absolute path to the built `.app`. Use that path to build a cmd-clickable `file://` URL. Steps:
+
+1. Grab the path from the `App path:` line in `reload.sh` output.
+2. Prepend `file://` and URL-encode spaces as `%20`. Do not hardcode any part of the path.
+3. Format it as a markdown link using the template for your agent type.
+
+Example. If `reload.sh` output contains:
+```
+App path:
+  /Users/someone/Library/Developer/Xcode/DerivedData/cmux-my-tag/Build/Products/Debug/cmux DEV my-tag.app
+```
+
+**Claude Code** outputs:
 ```markdown
 =======================================================
-[cmux DEV <tag-name>.app](file:///Users/lawrencechen/Library/Developer/Xcode/DerivedData/cmux-<tag-name>/Build/Products/Debug/cmux%20DEV%20<tag-name>.app)
+[cmux DEV my-tag.app](file:///Users/someone/Library/Developer/Xcode/DerivedData/cmux-my-tag/Build/Products/Debug/cmux%20DEV%20my-tag.app)
 =======================================================
 ```
 
-**Codex** (plain text format):
+**Codex** outputs:
 ```
 =======================================================
-[<tag-name>: file:///Users/lawrencechen/Library/Developer/Xcode/DerivedData/cmux-<tag-name>/Build/Products/Debug/cmux%20DEV%20<tag-name>.app](file:///Users/lawrencechen/Library/Developer/Xcode/DerivedData/cmux-<tag-name>/Build/Products/Debug/cmux%20DEV%20<tag-name>.app)
+[my-tag: file:///Users/someone/Library/Developer/Xcode/DerivedData/cmux-my-tag/Build/Products/Debug/cmux%20DEV%20my-tag.app](file:///Users/someone/Library/Developer/Xcode/DerivedData/cmux-my-tag/Build/Products/Debug/cmux%20DEV%20my-tag.app)
 =======================================================
 ```
 
-Never use `/tmp/cmux-<tag>/...` app links in chat output. If the expected DerivedData path is missing, resolve the real `.app` path and report that `file://` URL.
+Never use `/tmp/cmux-<tag>/...` app links in chat output.
 
-After making code changes, always use `reload.sh --tag` to build and launch. **Never run bare `xcodebuild` or `open` an untagged `cmux DEV.app`.** Untagged builds share the default debug socket and bundle ID with other agents, causing conflicts and stealing focus.
+After making code changes, always use `reload.sh --tag` to build. **Never run bare `xcodebuild` or `open` an untagged `cmux DEV.app`.** Untagged builds share the default debug socket and bundle ID with other agents, causing conflicts and stealing focus.
 
 ```bash
 ./scripts/reload.sh --tag <your-branch-slug>
@@ -58,10 +74,11 @@ When rebuilding cmuxd for release/bundling, always use ReleaseFast:
 cd cmuxd && zig build -Doptimize=ReleaseFast
 ```
 
-`reload` = kill and launch the Debug app only (tag required):
+`reload` = build the Debug app (tag required) and terminate any running app with the same tag. Pass `--launch` to also open the freshly-built app:
 
 ```bash
 ./scripts/reload.sh --tag <tag>
+./scripts/reload.sh --tag <tag> --launch
 ```
 
 `reloadp` = kill and launch the Release app:
@@ -106,10 +123,11 @@ tail -f "$(cat /tmp/cmux-last-debug-log-path 2>/dev/null || echo /tmp/cmux-debug
 - `reload.sh` writes the selected dev CLI path to `/tmp/cmux-last-cli-path`
 - `reload.sh` updates `/tmp/cmux-cli` and `$HOME/.local/bin/cmux-dev` to that CLI
 
-- Implementation: `vendor/bonsplit/Sources/Bonsplit/Public/DebugEventLog.swift`
-- Free function `dlog("message")` — logs with timestamp and appends to file in real time
-- Entire file is `#if DEBUG`; all call sites must be wrapped in `#if DEBUG` / `#endif`
-- 500-entry ring buffer; `DebugEventLog.shared.dump()` writes full buffer to file
+- Implementation: `Packages/CMUXDebugLog/Sources/CMUXDebugLog/DebugEventLog.swift`
+- App shim: `Sources/App/DebugLogging.swift`
+- Free function `cmuxDebugLog("message")` — logs with timestamp and appends to file in real time from cmux code
+- The package implementation and app shim are `#if DEBUG`; all call sites must be wrapped in `#if DEBUG` / `#endif`
+- 500-entry ring buffer; `CMUXDebugLog.DebugEventLog.shared.dump()` writes full buffer to file
 - Key events logged in `AppDelegate.swift` (monitor, performKeyEquivalent)
 - Mouse/UI events logged inline in views (ContentView, BrowserPanelView, etc.)
 - Focus events: `focus.panel`, `focus.bonsplit`, `focus.firstResponder`, `focus.moveFocus`
@@ -124,6 +142,14 @@ When adding a regression test for a bug fix, use a two-commit structure so CI pr
 
 This makes it visible in the GitHub PR UI (Commits tab, check statuses) that the test genuinely fails without the fix.
 
+## Debug menu
+
+The app has a **Debug** menu in the macOS menu bar (only in DEBUG builds). Use it for visual iteration:
+
+- **Debug > Debug Windows** contains panels for tuning layout, colors, and behavior. Entries are alphabetical with no dividers.
+- To add a debug toggle or visual option: create an `NSWindowController` subclass with a `shared` singleton, add it to the "Debug Windows" menu in `Sources/cmuxApp.swift`, and add a SwiftUI view with `@AppStorage` bindings for live changes.
+- When the user says "debug menu" or "debug window", they mean this menu, not `defaults write`.
+
 ## Pitfalls
 
 - **Custom UTTypes** for drag-and-drop must be declared in `Resources/Info.plist` under `UTExportedTypeDeclarations` (e.g. `com.splittabbar.tabtransfer`, `com.cmux.sidebar-tab-reorder`).
@@ -135,6 +161,9 @@ This makes it visible in the GitHub PR UI (Commits tab, check statuses) that the
 - **Terminal find layering contract:** `SurfaceSearchOverlay` must be mounted from `GhosttySurfaceScrollView` in `Sources/GhosttyTerminalView.swift` (AppKit portal layer), not from SwiftUI panel containers such as `Sources/Panels/TerminalPanelView.swift`. Portal-hosted terminal views can sit above SwiftUI during split/workspace churn.
 - **Submodule safety:** When modifying a submodule (ghostty, vendor/bonsplit, etc.), always push the submodule commit to its remote `main` branch BEFORE committing the updated pointer in the parent repo. Never commit on a detached HEAD or temporary branch — the commit will be orphaned and lost. Verify with: `cd <submodule> && git merge-base --is-ancestor HEAD origin/main`.
 - **All user-facing strings must be localized.** Use `String(localized: "key.name", defaultValue: "English text")` for every string shown in the UI (labels, buttons, menus, dialogs, tooltips, error messages). Keys go in `Resources/Localizable.xcstrings` with translations for all supported languages (currently English and Japanese). Never use bare string literals in SwiftUI `Text()`, `Button()`, alert titles, etc.
+- **Shortcut policy:** Every new cmux-owned keyboard shortcut must be added to `KeyboardShortcutSettings`, visible/editable in Settings, supported in `~/.config/cmux/settings.json`, and documented in the keyboard shortcut and configuration docs.
+- **Snapshot boundary for list subtrees.** In any SwiftUI panel whose `body` contains a `LazyVStack` / `LazyHStack` / `List` / `ForEach` of rows, no view below that boundary may hold a reference to an `ObservableObject` / `@Observable` store (no `@ObservedObject`, `@EnvironmentObject`, `@StateObject`, `@Bindable`, or even a plain `let store: SomeStore` property). Rows and drop-gaps receive immutable value snapshots plus closure action bundles only. Violating this reintroduces the "orthogonal @Published change invalidates every row and thrashes `LazyLayoutViewCache`" class of 100% CPU spin loop that hit the Sessions panel and the workspace sidebar (https://github.com/manaflow-ai/cmux/issues/2586). Reference pattern: `IndexSectionActions` / `SectionGapActions` / `SessionSearchFn` in `Sources/SessionIndexView.swift`.
+- **No state mutation inside view-body computations.** A function called from `body` (directly or through a helper) must not write `@Published` state, schedule a `Task { @MainActor in store.x = … }`, or `DispatchQueue.main.async` a store write. That creates a re-render feedback loop and pegs the main thread (same root-cause family as the snapshot-boundary rule). State-changing work triggered by "new data appeared" belongs in a `reload()` completion, a `didSet`, or a property-observer — never in the projection that feeds `ForEach`.
 
 ## Test quality policy
 
@@ -209,7 +238,7 @@ Use the `/release` command to prepare a new release. This will:
 2. Gather commits since the last tag and update the changelog
 3. Update `CHANGELOG.md` (the docs changelog page at `web/app/docs/changelog/page.tsx` reads from it)
 4. Run `./scripts/bump-version.sh` to update both versions
-5. Commit, tag, and push
+5. Commit, run `./scripts/release-pretag-guard.sh`, tag, and push
 
 Version bumping:
 
@@ -222,9 +251,18 @@ Version bumping:
 
 This updates both `MARKETING_VERSION` and `CURRENT_PROJECT_VERSION` (build number). The build number is auto-incremented and is required for Sparkle auto-update to work.
 
+Before creating a release tag, run:
+
+```bash
+./scripts/release-pretag-guard.sh
+```
+
+If it fails, run `./scripts/bump-version.sh`, commit the build-number bump, then retry tagging.
+
 Manual release steps (if not using the command):
 
 ```bash
+./scripts/release-pretag-guard.sh
 git tag vX.Y.Z
 git push origin vX.Y.Z
 gh run watch --repo manaflow-ai/cmux

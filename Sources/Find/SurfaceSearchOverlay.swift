@@ -19,6 +19,7 @@ struct SurfaceSearchOverlay: View {
     let tabId: UUID
     let surfaceId: UUID
     @ObservedObject var searchState: TerminalSurface.SearchState
+    let canApplyFocusRequest: () -> Bool
     let onMoveFocusToTerminal: () -> Void
     let onNavigateSearch: (_ action: String) -> Void
     let onFieldDidFocus: () -> Void
@@ -37,10 +38,11 @@ struct SurfaceSearchOverlay: View {
                     text: $searchState.needle,
                     isFocused: $isSearchFieldFocused,
                     surfaceId: surfaceId,
+                    canApplyFocusRequest: canApplyFocusRequest,
                     onFieldDidFocus: onFieldDidFocus,
                     onEscape: {
                         #if DEBUG
-                        dlog("find.nativeField.escape surface=\(surfaceId.uuidString.prefix(5)) needleEmpty=\(searchState.needle.isEmpty)")
+                        cmuxDebugLog("find.nativeField.escape surface=\(surfaceId.uuidString.prefix(5)) needleEmpty=\(searchState.needle.isEmpty)")
                         #endif
                         if searchState.needle.isEmpty {
                             onClose()
@@ -81,7 +83,7 @@ struct SurfaceSearchOverlay: View {
 
                 Button(action: {
                     #if DEBUG
-                    dlog("findbar.next surface=\(surfaceId.uuidString.prefix(5))")
+                    cmuxDebugLog("findbar.next surface=\(surfaceId.uuidString.prefix(5))")
                     #endif
                     onNavigateSearch("navigate_search:next")
                 }) {
@@ -92,7 +94,7 @@ struct SurfaceSearchOverlay: View {
 
                 Button(action: {
                     #if DEBUG
-                    dlog("findbar.prev surface=\(surfaceId.uuidString.prefix(5))")
+                    cmuxDebugLog("findbar.prev surface=\(surfaceId.uuidString.prefix(5))")
                     #endif
                     onNavigateSearch("navigate_search:previous")
                 }) {
@@ -103,7 +105,7 @@ struct SurfaceSearchOverlay: View {
 
                 Button(action: {
                     #if DEBUG
-                    dlog("findbar.close surface=\(surfaceId.uuidString.prefix(5))")
+                    cmuxDebugLog("findbar.close surface=\(surfaceId.uuidString.prefix(5))")
                     #endif
                     onClose()
                 }) {
@@ -118,7 +120,7 @@ struct SurfaceSearchOverlay: View {
             .shadow(radius: 4)
             .onAppear {
                 #if DEBUG
-                dlog("find.overlay.appear tab=\(tabId.uuidString.prefix(5)) surface=\(surfaceId.uuidString.prefix(5))")
+                cmuxDebugLog("find.overlay.appear tab=\(tabId.uuidString.prefix(5)) surface=\(surfaceId.uuidString.prefix(5))")
                 #endif
                 isSearchFieldFocused = true
             }
@@ -227,6 +229,7 @@ private struct SearchTextFieldRepresentable: NSViewRepresentable {
     @Binding var text: String
     @Binding var isFocused: Bool
     let surfaceId: UUID
+    let canApplyFocusRequest: () -> Bool
     let onFieldDidFocus: () -> Void
     let onEscape: () -> Void
     let onReturn: (_ isShift: Bool) -> Void
@@ -256,7 +259,7 @@ private struct SearchTextFieldRepresentable: NSViewRepresentable {
 
         func controlTextDidBeginEditing(_ obj: Notification) {
             #if DEBUG
-            dlog("find.nativeField.beginEditing surface=\(parent.surfaceId.uuidString.prefix(5))")
+            cmuxDebugLog("find.nativeField.beginEditing surface=\(parent.surfaceId.uuidString.prefix(5))")
             #endif
             parent.onFieldDidFocus()
             if !parent.isFocused {
@@ -268,7 +271,7 @@ private struct SearchTextFieldRepresentable: NSViewRepresentable {
 
         func controlTextDidEndEditing(_ obj: Notification) {
             #if DEBUG
-            dlog("find.nativeField.endEditing surface=\(parent.surfaceId.uuidString.prefix(5))")
+            cmuxDebugLog("find.nativeField.endEditing surface=\(parent.surfaceId.uuidString.prefix(5))")
             #endif
             if parent.isFocused {
                 DispatchQueue.main.async {
@@ -319,6 +322,7 @@ private struct SearchTextFieldRepresentable: NSViewRepresentable {
             guard let field, let coordinator else { return }
             guard let surface = notification.object as? TerminalSurface,
                   surface.id == coordinator.parent.surfaceId else { return }
+            guard coordinator.parent.canApplyFocusRequest() else { return }
             guard let window = field.window else { return }
             // Don't re-focus if already first responder. makeFirstResponder on an
             // already-editing NSTextField ends the editing session and restarts it
@@ -328,7 +332,7 @@ private struct SearchTextFieldRepresentable: NSViewRepresentable {
                 field.currentEditor() != nil ||
                 ((fr as? NSTextView)?.delegate as? NSTextField) === field
             #if DEBUG
-            dlog(
+            cmuxDebugLog(
                 "find.nativeField.searchFocusNotification surface=\(coordinator.parent.surfaceId.uuidString.prefix(5)) " +
                 "alreadyFocused=\(alreadyFocused) firstResponder=\(String(describing: fr))"
             )
@@ -336,7 +340,7 @@ private struct SearchTextFieldRepresentable: NSViewRepresentable {
             guard !alreadyFocused else { return }
             let result = window.makeFirstResponder(field)
 #if DEBUG
-            dlog(
+            cmuxDebugLog(
                 "find.nativeField.searchFocusApply surface=\(coordinator.parent.surfaceId.uuidString.prefix(5)) " +
                 "result=\(result ? 1 : 0) firstResponder=\(String(describing: window.firstResponder))"
             )
@@ -370,11 +374,16 @@ private struct SearchTextFieldRepresentable: NSViewRepresentable {
                 nsView.currentEditor() != nil ||
                 ((fr as? NSTextView)?.delegate as? NSTextField) === nsView
 
-            if isFocused, !isFirstResponder, context.coordinator.pendingFocusRequest != true {
+            if isFocused,
+               canApplyFocusRequest(),
+               !isFirstResponder,
+               context.coordinator.pendingFocusRequest != true {
                 context.coordinator.pendingFocusRequest = true
                 DispatchQueue.main.async { [weak nsView, weak coordinator = context.coordinator] in
                     coordinator?.pendingFocusRequest = nil
-                    guard let coordinator, coordinator.parent.isFocused else { return }
+                    guard let coordinator,
+                          coordinator.parent.isFocused,
+                          coordinator.parent.canApplyFocusRequest() else { return }
                     guard let nsView, let window = nsView.window else { return }
                     let fr = window.firstResponder
                     let alreadyFocused = fr === nsView ||
