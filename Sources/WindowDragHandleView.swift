@@ -84,23 +84,23 @@ private func windowDragHandleShouldResolveActiveHitCapture(
 
 /// Runs the same action macOS titlebars use for double-click:
 /// zoom by default, or minimize when the user preference is set.
-@discardableResult
-func performStandardTitlebarDoubleClick(window: NSWindow?) -> Bool {
-    guard let window else { return false }
+enum StandardTitlebarDoubleClickAction: Equatable {
+    case miniaturize
+    case zoom
+    case none
+}
 
-    let globalDefaults = UserDefaults.standard.persistentDomain(forName: UserDefaults.globalDomain) ?? [:]
+func resolvedStandardTitlebarDoubleClickAction(globalDefaults: [String: Any]) -> StandardTitlebarDoubleClickAction {
     if let action = (globalDefaults["AppleActionOnDoubleClick"] as? String)?
         .trimmingCharacters(in: .whitespacesAndNewlines)
         .lowercased() {
         switch action {
-        case "minimize":
-            window.miniaturize(nil)
-            return true
-        case "none":
-            return false
-        case "maximize", "zoom":
-            window.zoom(nil)
-            return true
+        case "minimize", "miniaturize":
+            return .miniaturize
+        case "maximize", "zoom", "fill":
+            return .zoom
+        case "none", "no action":
+            return .none
         default:
             break
         }
@@ -108,12 +108,29 @@ func performStandardTitlebarDoubleClick(window: NSWindow?) -> Bool {
 
     if let miniaturizeOnDoubleClick = globalDefaults["AppleMiniaturizeOnDoubleClick"] as? Bool,
        miniaturizeOnDoubleClick {
-        window.miniaturize(nil)
-        return true
+        return .miniaturize
     }
 
-    window.zoom(nil)
-    return true
+    return .zoom
+}
+
+/// Runs the same action macOS titlebars use for double-click:
+/// zoom by default, or minimize when the user preference is set.
+@discardableResult
+func performStandardTitlebarDoubleClick(window: NSWindow?) -> StandardTitlebarDoubleClickAction? {
+    guard let window else { return nil }
+
+    let globalDefaults = UserDefaults.standard.persistentDomain(forName: UserDefaults.globalDomain) ?? [:]
+    let action = resolvedStandardTitlebarDoubleClickAction(globalDefaults: globalDefaults)
+    switch action {
+    case .miniaturize:
+        window.miniaturize(nil)
+    case .zoom:
+        window.zoom(nil)
+    case .none:
+        break
+    }
+    return action
 }
 
 private enum WindowDragHandleAssociatedObjectKeys {
@@ -254,14 +271,14 @@ func windowDragHandleShouldCaptureHit(
                 ]
             )
             #if DEBUG
-            dlog(
+            cmuxDebugLog(
                 "titlebar.dragHandle.hitTest suppressionRecovered clearedDepth=\(clearedDepth) point=\(windowDragHandleFormatPoint(point))"
             )
             #endif
         } else {
         #if DEBUG
             let depth = windowDragSuppressionDepth(window: dragHandleWindow)
-            dlog(
+            cmuxDebugLog(
                 "titlebar.dragHandle.hitTest capture=false reason=suppressed depth=\(depth) point=\(windowDragHandleFormatPoint(point))"
             )
         #endif
@@ -280,7 +297,7 @@ func windowDragHandleShouldCaptureHit(
         let eventTypeDescription = eventType.map { String(describing: $0) } ?? "nil"
         let eventWindowNumber = eventWindow?.windowNumber ?? -1
         let dragWindowNumber = dragHandleWindow?.windowNumber ?? -1
-        dlog(
+        cmuxDebugLog(
             "titlebar.dragHandle.hitTest capture=false reason=passiveEvent eventType=\(eventTypeDescription) eventWindow=\(eventWindowNumber) dragWindow=\(dragWindowNumber) point=\(windowDragHandleFormatPoint(point))"
         )
         #endif
@@ -289,14 +306,14 @@ func windowDragHandleShouldCaptureHit(
 
     guard dragHandleView.bounds.contains(point) else {
         #if DEBUG
-        dlog("titlebar.dragHandle.hitTest capture=false reason=outside point=\(windowDragHandleFormatPoint(point))")
+        cmuxDebugLog("titlebar.dragHandle.hitTest capture=false reason=outside point=\(windowDragHandleFormatPoint(point))")
         #endif
         return false
     }
 
     guard let superview = dragHandleView.superview else {
         #if DEBUG
-        dlog("titlebar.dragHandle.hitTest capture=true reason=noSuperview point=\(windowDragHandleFormatPoint(point))")
+        cmuxDebugLog("titlebar.dragHandle.hitTest capture=true reason=noSuperview point=\(windowDragHandleFormatPoint(point))")
         #endif
         return true
     }
@@ -307,7 +324,7 @@ func windowDragHandleShouldCaptureHit(
     // violation in the Swift runtime.
     guard !_windowDragHandleIsResolvingSiblingHits else {
         #if DEBUG
-        dlog("titlebar.dragHandle.hitTest capture=false reason=reentrant point=\(windowDragHandleFormatPoint(point))")
+        cmuxDebugLog("titlebar.dragHandle.hitTest capture=false reason=reentrant point=\(windowDragHandleFormatPoint(point))")
         #endif
         return false
     }
@@ -330,14 +347,14 @@ func windowDragHandleShouldCaptureHit(
             let passiveHostHit = windowDragHandleShouldTreatTopHitAsPassiveHost(hitView)
             if passiveHostHit {
                 #if DEBUG
-                dlog(
+                cmuxDebugLog(
                     "titlebar.dragHandle.hitTest capture=defer point=\(windowDragHandleFormatPoint(point)) sibling=\(type(of: sibling)) hit=\(type(of: hitView)) passiveHost=true"
                 )
                 #endif
                 continue
             }
             #if DEBUG
-            dlog(
+            cmuxDebugLog(
                 "titlebar.dragHandle.hitTest capture=false point=\(windowDragHandleFormatPoint(point)) siblingCount=\(siblingCount) sibling=\(type(of: sibling)) hit=\(type(of: hitView)) passiveHost=false"
             )
             #endif
@@ -357,7 +374,7 @@ func windowDragHandleShouldCaptureHit(
     }
 
     #if DEBUG
-    dlog("titlebar.dragHandle.hitTest capture=true point=\(windowDragHandleFormatPoint(point)) siblingCount=\(siblingCount)")
+    cmuxDebugLog("titlebar.dragHandle.hitTest capture=true point=\(windowDragHandleFormatPoint(point)) siblingCount=\(siblingCount)")
     #endif
     return true
 }
@@ -393,7 +410,7 @@ struct WindowDragHandleView: NSViewRepresentable {
                 eventWindow: currentEvent?.window
             )
             #if DEBUG
-            dlog(
+            cmuxDebugLog(
                 "titlebar.dragHandle.hitTestResult capture=\(shouldCapture) point=\(windowDragHandleFormatPoint(point)) window=\(window != nil)"
             )
             #endif
@@ -404,24 +421,24 @@ struct WindowDragHandleView: NSViewRepresentable {
             #if DEBUG
             let point = convert(event.locationInWindow, from: nil)
             let depth = windowDragSuppressionDepth(window: window)
-            dlog(
+            cmuxDebugLog(
                 "titlebar.dragHandle.mouseDown point=\(windowDragHandleFormatPoint(point)) clickCount=\(event.clickCount) depth=\(depth)"
             )
             #endif
 
             if event.clickCount >= 2 {
-                let handled = performStandardTitlebarDoubleClick(window: window)
+                let action = performStandardTitlebarDoubleClick(window: window)
                 #if DEBUG
-                dlog("titlebar.dragHandle.mouseDownDoubleClick handled=\(handled ? 1 : 0)")
+                cmuxDebugLog("titlebar.dragHandle.mouseDownDoubleClick action=\(String(describing: action))")
                 #endif
-                if handled {
+                if action != nil {
                     return
                 }
             }
 
             guard !isWindowDragSuppressed(window: window) else {
                 #if DEBUG
-                dlog("titlebar.dragHandle.mouseDownIgnored reason=suppressed")
+                cmuxDebugLog("titlebar.dragHandle.mouseDownIgnored reason=suppressed")
                 #endif
                 return
             }
@@ -432,11 +449,56 @@ struct WindowDragHandleView: NSViewRepresentable {
                 }
                 #if DEBUG
                 let restored = previousMovableState.map { String($0) } ?? "nil"
-                dlog("titlebar.dragHandle.mouseDownComplete restoredMovable=\(restored) nowMovable=\(window.isMovable)")
+                cmuxDebugLog("titlebar.dragHandle.mouseDownComplete restoredMovable=\(restored) nowMovable=\(window.isMovable)")
                 #endif
             } else {
                 super.mouseDown(with: event)
             }
         }
+    }
+}
+
+/// Local monitor that guarantees double-clicks in custom titlebar surfaces trigger
+/// the standard macOS titlebar action even when the visible strip is hosted by
+/// higher-level SwiftUI/AppKit container views.
+struct TitlebarDoubleClickMonitorView: NSViewRepresentable {
+    final class Coordinator {
+        weak var view: NSView?
+        var monitor: Any?
+
+        deinit {
+            if let monitor {
+                NSEvent.removeMonitor(monitor)
+            }
+        }
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView(frame: .zero)
+        view.wantsLayer = true
+        view.layer?.backgroundColor = NSColor.clear.cgColor
+
+        context.coordinator.view = view
+
+        let coordinator = context.coordinator
+        coordinator.monitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown]) { [weak coordinator] event in
+            guard event.clickCount >= 2 else { return event }
+            guard let coordinator, let view = coordinator.view, let window = view.window else { return event }
+            guard event.window === window else { return event }
+
+            let point = view.convert(event.locationInWindow, from: nil)
+            guard view.bounds.contains(point) else { return event }
+
+            let action = performStandardTitlebarDoubleClick(window: window)
+            return action == nil ? event : nil
+        }
+
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        context.coordinator.view = nsView
     }
 }

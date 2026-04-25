@@ -1,3 +1,56 @@
+## Sync 2026-04-25 07:22 UTC — 777 commits from upstream
+
+- 51741a54 Improve default light and dark theme fallback (#3123)
+- 7ebf2233 Decouple debug logging from Bonsplit (#3128)
+- 444197f3 Add configurable cmux.json workspace and tab bar actions
+- 7102fdf3 Restore previous sessions and resume agents (#2978)
+- 03a0c14b Apply sidebar background to right panel
+- fdaf873c Split AppDelegate support code into focused files (#3104)
+- ad20c651 Split support code out of large Swift files
+- 3e84c162 Fix minimal-mode traffic-light inset and new-window Bonsplit tab bar (#3055)
+- 54b6a42b Revert "Stop idle tmux overlay animation churn (#3078)" (#3086)
+- 68387746 Stop idle tmux overlay animation churn (#3078)
+- c47634f0 Issue 3081 workspace color left rail (#3082)
+- e0f80ccf Fix AX window polling stalls with app hierarchy caching (#2986)
+- e39f5e02 Fix main-thread blocking in workspace PR refresh (#3036)
+- bd02bed8 Drop stale merged PR from sidebar badge selection (#3054) (#3063)
+- 1a95cbba Explain shortcut recorder rejections inline (fixes #2988) (#3035)
+- 0eed21c3 Use workspace color for selected sidebar rows (#3038)
+- 0bdf6949 Fix terminal blanking after OSC completion notifications (#3048)
+- fd93a7c8 web: give the Stack Auth handler layout the site's Geist fonts (#3043)
+- 27e860f0 Trim Stack Auth env values before StackServerApp (#3041)
+- 3885a0b5 Add unified config settings utility window (#3024)
+- 92769d74 Fix DebugEventLog NSFileHandle ObjC exception crash (#3034)
+- d56cf9bc Bring minimal macOS auth scaffolding to main (#3027)
+- 1bfb2266 Pin regular-weight Japanese auto-fallback face (#3015)
+- 3af1173a Fix 100% CPU from ContentView publisher feedback loop (fixes #3020) (#3028)
+- e9768936 Serialize xcodebuild and fetch prebuilt GhosttyKit to unblock Xcode 26 builds (#2981)
+- 8ff5f77f Fix #3011 blank terminal after workspace selection (#3012)
+- 6fe581ef Fix sessions panel CPU loop on nightly (#3013)
+- cd0eb467 Speed up large terminal pastes (#2940) (#3000)
+- 3698f137 Fix Cmd/Ctrl shortcut hint parity (#2992) (#2994)
+- bd75a031 Sessions popover: also cancel drag on Escape (#2995)
+- 914a5caa Keep LazyVStack virtualization; isolate drag state + Equatable row snapshots (#2970)
+- a5a1cafb Fix close confirmation bypass when spamming close (#2989)
+- 95fa19de Preserve incoming cachePolicy on new-tab navigation seed
+- 54b067e7 Skip init-time insecure HTTP gate when one-shot bypass is seeded
+- 7d37acf4 Address browser PR review feedback
+- 5c866bd4 Fix deferred file-drop overlay installation
+- a90bc548 Honor Ghostty keybindings after paste menu miss
+- 06c6d349 Organize terminal paste fallback regression tests
+- 70618b0f Fix file drop overlay startup installation
+- 1194c396 Tighten terminal paste regression tests
+- b1dd2312 Add regression test for repeated file drop overlay install
+- 3bc13afb Recover Ghostty surface before consuming paste shortcuts
+- 2796ae49 Add regression coverage for paste surface recovery
+- 81052f42 fix: preserve terminal paste when menu shortcut misses
+- e125fc30 test: cover terminal Cmd+V fallback when menu misses
+- b4efe38d Add Sessions panel to right sidebar (#2936)
+- d2aee0f7 reload.sh: always kill same-tag app after a successful build (#2956)
+- cb1a6de8 Fix bilibili search popup opening detached window
+- 479dac9b Add bilibili popup regression coverage
+- 3856ffaa Address remaining scrollback review feedback
+
 ## Sync 2026-03-17 14:51 UTC — 44 commits from upstream
 
 - 8d8fadbb Add hidden CLI command for live terminal debugging (#1599)
