@@ -8,6 +8,72 @@ import Darwin
 import Network
 import CoreText
 
+#if DEBUG
+private func debugWorkspaceDescriptionPreview(_ text: String?, limit: Int = 120) -> String {
+    guard let text else { return "nil" }
+    let escaped = text
+        .replacingOccurrences(of: "\\", with: "\\\\")
+        .replacingOccurrences(of: "\n", with: "\\n")
+        .replacingOccurrences(of: "\r", with: "\\r")
+        .replacingOccurrences(of: "\t", with: "\\t")
+    if escaped.count <= limit {
+        return escaped
+    }
+    return "\(escaped.prefix(limit))..."
+}
+#endif
+
+struct CmuxSurfaceConfigTemplate {
+    var fontSize: Float32 = 0
+    var workingDirectory: String?
+    var command: String?
+    var environmentVariables: [String: String] = [:]
+    var initialInput: String?
+    var waitAfterCommand: Bool = false
+
+    init() {}
+
+    init(cConfig: ghostty_surface_config_s) {
+        fontSize = cConfig.font_size
+        if let workingDirectory = cConfig.working_directory {
+            self.workingDirectory = String(cString: workingDirectory, encoding: .utf8)
+        }
+        if let command = cConfig.command {
+            self.command = String(cString: command, encoding: .utf8)
+        }
+        if let initialInput = cConfig.initial_input {
+            self.initialInput = String(cString: initialInput, encoding: .utf8)
+        }
+        if cConfig.env_var_count > 0, let envVars = cConfig.env_vars {
+            for index in 0..<Int(cConfig.env_var_count) {
+                let envVar = envVars[index]
+                if let key = String(cString: envVar.key, encoding: .utf8),
+                   let value = String(cString: envVar.value, encoding: .utf8) {
+                    environmentVariables[key] = value
+                }
+            }
+        }
+        waitAfterCommand = cConfig.wait_after_command
+    }
+}
+
+enum WorkspacePendingTerminalInputReason {
+    case configurationCommand
+}
+
+enum WorkspacePendingTerminalInputPolicy {
+    static func timeout(for reason: WorkspacePendingTerminalInputReason) -> TimeInterval? {
+        switch reason {
+        case .configurationCommand:
+            return 3.0
+        }
+    }
+}
+
+private final class WorkspacePendingTerminalInputObserver: @unchecked Sendable {
+    var observer: NSObjectProtocol?
+}
+
 func cmuxSurfaceContextName(_ context: ghostty_surface_context_e) -> String {
     switch context {
     case GHOSTTY_SURFACE_CONTEXT_WINDOW:
@@ -21,12 +87,31 @@ func cmuxSurfaceContextName(_ context: ghostty_surface_context_e) -> String {
     }
 }
 
+private func cmuxPointerAppearsLive(_ pointer: UnsafeMutableRawPointer?) -> Bool {
+    guard let pointer,
+          malloc_zone_from_ptr(pointer) != nil else {
+        return false
+    }
+    return malloc_size(pointer) > 0
+}
+
+func cmuxSurfacePointerAppearsLive(_ surface: ghostty_surface_t) -> Bool {
+    // Best-effort check: reject pointers that no longer belong to an active
+    // malloc zone allocation. A Swift wrapper around `ghostty_surface_t` can
+    // remain non-nil after the backing native surface has already been freed.
+    cmuxPointerAppearsLive(surface)
+}
+
 func cmuxCurrentSurfaceFontSizePoints(_ surface: ghostty_surface_t) -> Float? {
+    guard cmuxSurfacePointerAppearsLive(surface) else {
+        return nil
+    }
+
     guard let quicklookFont = ghostty_surface_quicklook_font(surface) else {
         return nil
     }
 
-    let ctFont = Unmanaged<CTFont>.fromOpaque(quicklookFont).takeRetainedValue()
+    let ctFont = Unmanaged<CTFont>.fromOpaque(quicklookFont).takeUnretainedValue()
     let points = Float(CTFontGetSize(ctFont))
     guard points > 0 else { return nil }
     return points
@@ -35,22 +120,22 @@ func cmuxCurrentSurfaceFontSizePoints(_ surface: ghostty_surface_t) -> Float? {
 func cmuxInheritedSurfaceConfig(
     sourceSurface: ghostty_surface_t,
     context: ghostty_surface_context_e
-) -> ghostty_surface_config_s {
+) -> CmuxSurfaceConfigTemplate {
     let inherited = ghostty_surface_inherited_config(sourceSurface, context)
-    var config = inherited
+    var config = CmuxSurfaceConfigTemplate(cConfig: inherited)
 
     // Make runtime zoom inheritance explicit, even when Ghostty's
     // inherit-font-size config is disabled.
     let runtimePoints = cmuxCurrentSurfaceFontSizePoints(sourceSurface)
     if let points = runtimePoints {
-        config.font_size = points
+        config.fontSize = points
     }
 
 #if DEBUG
     let inheritedText = String(format: "%.2f", inherited.font_size)
     let runtimeText = runtimePoints.map { String(format: "%.2f", $0) } ?? "nil"
-    let finalText = String(format: "%.2f", config.font_size)
-    dlog(
+    let finalText = String(format: "%.2f", config.fontSize)
+    cmuxDebugLog(
         "zoom.inherit context=\(cmuxSurfaceContextName(context)) " +
         "inherited=\(inheritedText) runtime=\(runtimeText) final=\(finalText)"
     )
@@ -59,7 +144,7 @@ func cmuxInheritedSurfaceConfig(
     return config
 }
 
-struct SidebarStatusEntry {
+struct SidebarStatusEntry: Equatable {
     let key: String
     let value: String
     let icon: String?
@@ -90,7 +175,7 @@ struct SidebarStatusEntry {
     }
 }
 
-struct SidebarMetadataBlock {
+struct SidebarMetadataBlock: Equatable {
     let key: String
     let markdown: String
     let priority: Int
@@ -105,6 +190,35 @@ enum SidebarMetadataFormat: String {
 private struct SessionPaneRestoreEntry {
     let paneId: PaneID
     let snapshot: SessionPaneLayoutSnapshot
+}
+
+private enum RemoteDropUploadError: LocalizedError {
+    case unavailable
+    case invalidFileURL
+    case uploadFailed(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .unavailable:
+            String(
+                localized: "error.remoteDrop.unavailable",
+                defaultValue: "Remote drop is unavailable."
+            )
+        case .invalidFileURL:
+            String(
+                localized: "error.remoteDrop.invalidFileURL",
+                defaultValue: "Dropped item is not a file URL."
+            )
+        case .uploadFailed(let detail):
+            String.localizedStringWithFormat(
+                String(
+                    localized: "error.remoteDrop.uploadFailed",
+                    defaultValue: "Failed to upload dropped file: %@"
+                ),
+                detail
+            )
+        }
+    }
 }
 
 struct WorkspaceRemoteDaemonManifest: Decodable, Equatable {
@@ -150,7 +264,10 @@ extension Workspace {
         )
     }
 
-    func sessionSnapshot(includeScrollback: Bool) -> SessionWorkspaceSnapshot {
+    func sessionSnapshot(
+        includeScrollback: Bool,
+        restorableAgentIndex: RestorableAgentSessionIndex? = nil
+    ) -> SessionWorkspaceSnapshot {
         let tree = bonsplitController.treeSnapshot()
         let layout = sessionLayoutSnapshot(from: tree)
 
@@ -166,7 +283,13 @@ extension Workspace {
 
         let panelSnapshots = allPanelIds
             .prefix(SessionPersistencePolicy.maxPanelsPerWorkspace)
-            .compactMap { sessionPanelSnapshot(panelId: $0, includeScrollback: includeScrollback) }
+            .compactMap { panelId in
+                sessionPanelSnapshot(
+                    panelId: panelId,
+                    includeScrollback: includeScrollback,
+                    restorableAgent: restorableAgentIndex?.snapshot(workspaceId: id, panelId: panelId)
+                )
+            }
 
         let statusSnapshots = statusEntries.values
             .sorted { lhs, rhs in lhs.key < rhs.key }
@@ -198,8 +321,10 @@ extension Workspace {
         return SessionWorkspaceSnapshot(
             processTitle: processTitle,
             customTitle: customTitle,
+            customDescription: customDescription,
             customColor: customColor,
             isPinned: isPinned,
+            terminalScrollBarHidden: terminalScrollBarHidden ? true : nil,
             currentDirectory: currentDirectory,
             focusedPanelId: focusedPanelId,
             layout: layout,
@@ -213,6 +338,9 @@ extension Workspace {
 
     func restoreSessionSnapshot(_ snapshot: SessionWorkspaceSnapshot) {
         restoredTerminalScrollbackByPanelId.removeAll(keepingCapacity: false)
+        restoredAgentSnapshotsByPanelId.removeAll(keepingCapacity: false)
+        restoredAgentAutoResumePendingPanelIds.removeAll(keepingCapacity: false)
+        invalidatedRestoredAgentFingerprintsByPanelId.removeAll(keepingCapacity: false)
 
         let normalizedCurrentDirectory = snapshot.currentDirectory.trimmingCharacters(in: .whitespacesAndNewlines)
         if !normalizedCurrentDirectory.isEmpty {
@@ -237,14 +365,17 @@ extension Workspace {
 
         applyProcessTitle(snapshot.processTitle)
         setCustomTitle(snapshot.customTitle)
+        setCustomDescription(snapshot.customDescription)
         setCustomColor(snapshot.customColor)
         isPinned = snapshot.isPinned
+        setTerminalScrollBarHidden(snapshot.terminalScrollBarHidden ?? false)
 
         // Status entries and agent PIDs are ephemeral runtime state tied to running
         // processes (e.g. claude_code "Running"). Don't restore them across app
         // restarts because the processes that set them are gone.
         statusEntries.removeAll()
         agentPIDs.removeAll()
+        agentListeningPorts.removeAll()
         logEntries = snapshot.logEntries.map { entry in
             SidebarLogEntry(
                 message: entry.message,
@@ -327,18 +458,38 @@ extension Workspace {
         return decoded.id
     }
 
-    private func sessionPanelSnapshot(panelId: UUID, includeScrollback: Bool) -> SessionPanelSnapshot? {
+    private func sessionPanelSnapshot(
+        panelId: UUID,
+        includeScrollback: Bool,
+        restorableAgent: SessionRestorableAgentSnapshot?
+    ) -> SessionPanelSnapshot? {
         guard let panel = panels[panelId] else { return nil }
+
+        if let restorableAgent {
+            let fingerprint = TabManager.restorableAgentSnapshotFingerprint(restorableAgent)
+            if invalidatedRestoredAgentFingerprintsByPanelId[panelId] == fingerprint {
+                restoredAgentSnapshotsByPanelId.removeValue(forKey: panelId)
+            } else {
+                restoredAgentSnapshotsByPanelId[panelId] = restorableAgent
+                invalidatedRestoredAgentFingerprintsByPanelId.removeValue(forKey: panelId)
+            }
+        }
+        let effectiveRestorableAgent = restoredAgentSnapshotsByPanelId[panelId]
 
         let panelTitle = panelTitle(panelId: panelId)
         let customTitle = panelCustomTitles[panelId]
-        let directory = panelDirectories[panelId]
+        let directory = panelDirectories[panelId] ?? effectiveRestorableAgent?.workingDirectory
         let isPinned = pinnedPanelIds.contains(panelId)
         let isManuallyUnread = manualUnreadPanelIds.contains(panelId)
         let branchSnapshot = panelGitBranches[panelId].map {
             SessionGitBranchSnapshot(branch: $0.branch, isDirty: $0.isDirty)
         }
-        let listeningPorts = (surfaceListeningPorts[panelId] ?? []).sorted()
+        let listeningPorts: [Int]
+        if remoteDetectedSurfaceIds.contains(panelId) || isRemoteTerminalSurface(panelId) {
+            listeningPorts = []
+        } else {
+            listeningPorts = (surfaceListeningPorts[panelId] ?? []).sorted()
+        }
         let ttyName = surfaceTTYNames[panelId]
 
         let terminalSnapshot: SessionTerminalPanelSnapshot?
@@ -362,8 +513,9 @@ extension Workspace {
                 allowFallbackScrollback: shouldPersistScrollback
             )
             terminalSnapshot = SessionTerminalPanelSnapshot(
-                workingDirectory: panelDirectories[panelId],
-                scrollback: resolvedScrollback
+                workingDirectory: directory,
+                scrollback: resolvedScrollback,
+                agent: effectiveRestorableAgent
             )
             browserSnapshot = nil
             markdownSnapshot = nil
@@ -415,6 +567,14 @@ extension Workspace {
         }
         guard allowFallbackScrollback else { return nil }
         return SessionPersistencePolicy.truncatedScrollback(fallbackScrollback)
+    }
+
+    nonisolated static func shouldReplaySessionScrollback(
+        restorableAgent: SessionRestorableAgentSnapshot?
+    ) -> Bool {
+        // Agent restores relaunch from the provider's session ID. Replaying the
+        // old TUI scrollback can print stale launch commands and race the resume input.
+        restorableAgent == nil
     }
 
     private func terminalSnapshotScrollback(
@@ -534,31 +694,68 @@ extension Workspace {
     private func createPanel(from snapshot: SessionPanelSnapshot, inPane paneId: PaneID) -> UUID? {
         switch snapshot.type {
         case .terminal:
-            let workingDirectory = snapshot.terminal?.workingDirectory ?? snapshot.directory ?? currentDirectory
+            let workingDirectory =
+                snapshot.terminal?.workingDirectory
+                ?? snapshot.terminal?.agent?.workingDirectory
+                ?? snapshot.directory
+                ?? currentDirectory
+            let restorableAgent = snapshot.terminal?.agent
+            let shouldReplayScrollback = Self.shouldReplaySessionScrollback(
+                restorableAgent: restorableAgent
+            )
+            let restoredAgentResumeInput = restorableAgent?.resumeStartupInput()
+#if DEBUG
+            if let restorableAgent {
+                let sessionPreview = String(restorableAgent.sessionId.prefix(8))
+                let launchArgc = restorableAgent.launchCommand?.arguments.count ?? 0
+                cmuxDebugLog(
+                    "session.restore.agent panel=\(snapshot.id.uuidString.prefix(5)) " +
+                    "kind=\(restorableAgent.kind.rawValue) session=\(sessionPreview) " +
+                    "hasLaunch=\(restorableAgent.launchCommand == nil ? 0 : 1) " +
+                    "launchArgc=\(launchArgc) hasResume=\(restoredAgentResumeInput == nil ? 0 : 1) " +
+                    "replayScrollback=\(shouldReplayScrollback ? 1 : 0)"
+                )
+            }
+#endif
             let replayEnvironment = SessionScrollbackReplayStore.replayEnvironment(
-                for: snapshot.terminal?.scrollback
+                for: shouldReplayScrollback ? snapshot.terminal?.scrollback : nil
             )
             guard let terminalPanel = newTerminalSurface(
                 inPane: paneId,
                 focus: false,
                 workingDirectory: workingDirectory,
+                initialInput: restoredAgentResumeInput,
                 startupEnvironment: replayEnvironment
             ) else {
                 return nil
             }
-            let fallbackScrollback = SessionPersistencePolicy.truncatedScrollback(snapshot.terminal?.scrollback)
+            let fallbackScrollback = shouldReplayScrollback
+                ? SessionPersistencePolicy.truncatedScrollback(snapshot.terminal?.scrollback)
+                : nil
             if let fallbackScrollback {
                 restoredTerminalScrollbackByPanelId[terminalPanel.id] = fallbackScrollback
             } else {
                 restoredTerminalScrollbackByPanelId.removeValue(forKey: terminalPanel.id)
             }
+            if let restorableAgent {
+                restoredAgentSnapshotsByPanelId[terminalPanel.id] = restorableAgent
+                if restoredAgentResumeInput != nil {
+                    restoredAgentAutoResumePendingPanelIds.insert(terminalPanel.id)
+                } else {
+                    restoredAgentAutoResumePendingPanelIds.remove(terminalPanel.id)
+                }
+                invalidatedRestoredAgentFingerprintsByPanelId.removeValue(forKey: terminalPanel.id)
+            } else {
+                restoredAgentSnapshotsByPanelId.removeValue(forKey: terminalPanel.id)
+                restoredAgentAutoResumePendingPanelIds.remove(terminalPanel.id)
+                invalidatedRestoredAgentFingerprintsByPanelId.removeValue(forKey: terminalPanel.id)
+            }
             applySessionPanelMetadata(snapshot, toPanelId: terminalPanel.id)
             return terminalPanel.id
         case .browser:
-            let initialURL = snapshot.browser?.urlString.flatMap { URL(string: $0) }
             guard let browserPanel = newBrowserSurface(
                 inPane: paneId,
-                url: initialURL,
+                url: nil,
                 focus: false,
                 preferredProfileID: snapshot.browser?.profileID
             ) else {
@@ -611,19 +808,16 @@ extension Workspace {
         } else {
             surfaceTTYNames.removeValue(forKey: panelId)
         }
+        syncRemotePortScanTTYs()
 
         if let browserSnapshot = snapshot.browser,
            let browserPanel = browserPanel(for: panelId) {
-            browserPanel.restoreSessionNavigationHistory(
-                backHistoryURLStrings: browserSnapshot.backHistoryURLStrings ?? [],
-                forwardHistoryURLStrings: browserSnapshot.forwardHistoryURLStrings ?? [],
-                currentURLString: browserSnapshot.urlString
-            )
-
             let pageZoom = CGFloat(max(0.25, min(5.0, browserSnapshot.pageZoom)))
             if pageZoom.isFinite {
                 _ = browserPanel.setPageZoomFactor(pageZoom)
             }
+
+            browserPanel.restoreSessionSnapshot(browserSnapshot)
 
             if browserSnapshot.developerToolsVisible {
                 _ = browserPanel.showDeveloperTools()
@@ -653,6 +847,288 @@ extension Workspace {
             return
         }
     }
+}
+
+// MARK: - cmux.json custom layout
+
+extension Workspace {
+
+    func applyCustomLayout(_ layout: CmuxLayoutNode, baseCwd: String) {
+        guard let rootPaneId = bonsplitController.allPaneIds.first else { return }
+
+        var leaves: [(paneId: PaneID, surfaces: [CmuxSurfaceDefinition])] = []
+        buildCustomLayoutTree(layout, inPane: rootPaneId, leaves: &leaves)
+
+        // First leaf reuses the initial terminal created by addWorkspace;
+        // subsequent leaves were created via newTerminalSplit which also seeds
+        // a placeholder terminal.
+        var focusPanelId: UUID?
+        for leaf in leaves {
+            populateCustomPane(leaf.paneId, surfaces: leaf.surfaces, baseCwd: baseCwd, focusPanelId: &focusPanelId)
+        }
+
+        let liveRoot = bonsplitController.treeSnapshot()
+        applyCustomDividerPositions(configNode: layout, liveNode: liveRoot)
+
+        if let focusPanelId {
+            focusPanel(focusPanelId)
+        }
+    }
+
+    private func buildCustomLayoutTree(
+        _ node: CmuxLayoutNode,
+        inPane paneId: PaneID,
+        leaves: inout [(paneId: PaneID, surfaces: [CmuxSurfaceDefinition])]
+    ) {
+        switch node {
+        case .pane(let pane):
+            leaves.append((paneId: paneId, surfaces: pane.surfaces))
+
+        case .split(let split):
+            guard split.children.count == 2 else {
+                NSLog("[CmuxConfig] split node requires exactly 2 children, got %d", split.children.count)
+                leaves.append((paneId: paneId, surfaces: []))
+                return
+            }
+
+            var anchorPanelId = bonsplitController
+                .tabs(inPane: paneId)
+                .compactMap { panelIdFromSurfaceId($0.id) }
+                .first
+
+            if anchorPanelId == nil {
+                anchorPanelId = newTerminalSurface(inPane: paneId, focus: false)?.id
+            }
+
+            guard let anchorPanelId,
+                  let newSplitPanel = newTerminalSplit(
+                      from: anchorPanelId,
+                      orientation: split.splitOrientation,
+                      insertFirst: false,
+                      focus: false
+                  ),
+                  let secondPaneId = self.paneId(forPanelId: newSplitPanel.id) else {
+                leaves.append((paneId: paneId, surfaces: []))
+                return
+            }
+
+            buildCustomLayoutTree(split.children[0], inPane: paneId, leaves: &leaves)
+            buildCustomLayoutTree(split.children[1], inPane: secondPaneId, leaves: &leaves)
+        }
+    }
+
+    private func populateCustomPane(
+        _ paneId: PaneID,
+        surfaces: [CmuxSurfaceDefinition],
+        baseCwd: String,
+        focusPanelId: inout UUID?
+    ) {
+        let existingPanelIds = bonsplitController
+            .tabs(inPane: paneId)
+            .compactMap { panelIdFromSurfaceId($0.id) }
+
+        guard !surfaces.isEmpty else { return }
+
+        let firstSurface = surfaces[0]
+        if let placeholderPanelId = existingPanelIds.first {
+            configureExistingSurface(
+                panelId: placeholderPanelId,
+                inPane: paneId,
+                surface: firstSurface,
+                baseCwd: baseCwd,
+                focusPanelId: &focusPanelId
+            )
+        }
+
+        for surfaceIndex in 1..<surfaces.count {
+            createNewSurface(
+                inPane: paneId,
+                surface: surfaces[surfaceIndex],
+                baseCwd: baseCwd,
+                focusPanelId: &focusPanelId
+            )
+        }
+    }
+
+    private func configureExistingSurface(
+        panelId: UUID,
+        inPane paneId: PaneID,
+        surface: CmuxSurfaceDefinition,
+        baseCwd: String,
+        focusPanelId: inout UUID?
+    ) {
+        switch surface.type {
+        case .terminal where surface.cwd != nil || surface.env != nil:
+            // Placeholder can't change cwd/env — replace it
+            let resolvedCwd = CmuxConfigStore.resolveCwd(surface.cwd, relativeTo: baseCwd)
+            if let panel = newTerminalSurface(
+                inPane: paneId,
+                focus: false,
+                workingDirectory: resolvedCwd,
+                startupEnvironment: surface.env ?? [:]
+            ) {
+                _ = closePanel(panelId, force: true)
+                if let name = surface.name { setPanelCustomTitle(panelId: panel.id, title: name) }
+                if surface.focus == true { focusPanelId = panel.id }
+                if let command = surface.command { sendInputWhenReady(command + "\n", to: panel) }
+            }
+
+        case .terminal:
+            if let name = surface.name { setPanelCustomTitle(panelId: panelId, title: name) }
+            if surface.focus == true { focusPanelId = panelId }
+            if let command = surface.command, let terminal = terminalPanel(for: panelId) {
+                sendInputWhenReady(command + "\n", to: terminal)
+            }
+
+        case .browser:
+            let url = surface.url.flatMap { URL(string: $0) }
+            if let panel = newBrowserSurface(inPane: paneId, url: url, focus: false) {
+                _ = closePanel(panelId, force: true)
+                if let name = surface.name { setPanelCustomTitle(panelId: panel.id, title: name) }
+                if surface.focus == true { focusPanelId = panel.id }
+            }
+        }
+    }
+
+    private func createNewSurface(
+        inPane paneId: PaneID,
+        surface: CmuxSurfaceDefinition,
+        baseCwd: String,
+        focusPanelId: inout UUID?
+    ) {
+        switch surface.type {
+        case .terminal:
+            let resolvedCwd = CmuxConfigStore.resolveCwd(surface.cwd, relativeTo: baseCwd)
+            if let panel = newTerminalSurface(
+                inPane: paneId,
+                focus: false,
+                workingDirectory: resolvedCwd,
+                startupEnvironment: surface.env ?? [:]
+            ) {
+                if let name = surface.name { setPanelCustomTitle(panelId: panel.id, title: name) }
+                if surface.focus == true { focusPanelId = panel.id }
+                if let command = surface.command { sendInputWhenReady(command + "\n", to: panel) }
+            }
+
+        case .browser:
+            let url = surface.url.flatMap { URL(string: $0) }
+            if let panel = newBrowserSurface(inPane: paneId, url: url, focus: false) {
+                if let name = surface.name { setPanelCustomTitle(panelId: panel.id, title: name) }
+                if surface.focus == true { focusPanelId = panel.id }
+            }
+        }
+    }
+
+    private func applyCustomDividerPositions(
+        configNode: CmuxLayoutNode,
+        liveNode: ExternalTreeNode
+    ) {
+        switch (configNode, liveNode) {
+        case (.split(let configSplit), .split(let liveSplit)):
+            if let splitID = UUID(uuidString: liveSplit.id) {
+                _ = bonsplitController.setDividerPosition(
+                    CGFloat(configSplit.clampedSplitPosition),
+                    forSplit: splitID,
+                    fromExternal: true
+                )
+            }
+            if configSplit.children.count == 2 {
+                applyCustomDividerPositions(configNode: configSplit.children[0], liveNode: liveSplit.first)
+                applyCustomDividerPositions(configNode: configSplit.children[1], liveNode: liveSplit.second)
+            }
+        default:
+            break
+        }
+    }
+
+    private func sendInputWhenReady(
+        _ text: String,
+        to panel: TerminalPanel,
+        reason: WorkspacePendingTerminalInputReason = .configurationCommand
+    ) {
+        if panel.surface.surface != nil {
+            panel.sendInput(text)
+            return
+        }
+
+        let timeout = WorkspacePendingTerminalInputPolicy.timeout(for: reason)
+        let panelId = panel.id
+        let registration = WorkspacePendingTerminalInputObserver()
+
+        registration.observer = NotificationCenter.default.addObserver(
+            forName: .terminalSurfaceDidBecomeReady,
+            object: panel.surface,
+            queue: .main
+        ) { [weak self, registration] _ in
+            Task { @MainActor [weak self, registration] in
+                guard
+                    let self,
+                    self.hasPendingTerminalInputObserver(registration, forPanelId: panelId)
+                else {
+                    return
+                }
+
+                self.removePendingTerminalInputObserver(registration, forPanelId: panelId)
+                if let panel = self.panels[panelId] as? TerminalPanel {
+                    panel.sendInput(text)
+                }
+            }
+        }
+        pendingTerminalInputObserversByPanelId[panelId, default: []].append(registration)
+
+        guard let timeout else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + timeout) { [weak self, registration] in
+            Task { @MainActor [weak self, registration] in
+                guard
+                    let self,
+                    self.hasPendingTerminalInputObserver(registration, forPanelId: panelId)
+                else {
+                    return
+                }
+
+                self.removePendingTerminalInputObserver(registration, forPanelId: panelId)
+                NSLog("[CmuxConfig] surface not ready after 3s, dropping command (%d chars)", text.count)
+            }
+        }
+    }
+
+    private func hasPendingTerminalInputObserver(
+        _ registration: WorkspacePendingTerminalInputObserver,
+        forPanelId panelId: UUID
+    ) -> Bool {
+        pendingTerminalInputObserversByPanelId[panelId]?.contains {
+            $0 === registration
+        } == true
+    }
+
+    private func removePendingTerminalInputObserver(
+        _ registration: WorkspacePendingTerminalInputObserver,
+        forPanelId panelId: UUID
+    ) {
+        if let observer = registration.observer {
+            NotificationCenter.default.removeObserver(observer)
+            registration.observer = nil
+        }
+        pendingTerminalInputObserversByPanelId[panelId]?.removeAll {
+            $0 === registration
+        }
+        if pendingTerminalInputObserversByPanelId[panelId]?.isEmpty == true {
+            pendingTerminalInputObserversByPanelId.removeValue(forKey: panelId)
+        }
+    }
+
+    private func removePendingTerminalInputObservers(forPanelId panelId: UUID) {
+        guard let observers = pendingTerminalInputObserversByPanelId.removeValue(forKey: panelId) else {
+            return
+        }
+        for registration in observers {
+            if let observer = registration.observer {
+                NotificationCenter.default.removeObserver(observer)
+                registration.observer = nil
+            }
+        }
+    }
+
 }
 
 final class WorkspaceRemoteDaemonPendingCallRegistry {
@@ -747,6 +1223,125 @@ final class WorkspaceRemoteDaemonPendingCallRegistry {
     }
 }
 
+enum WorkspaceRemoteSSHBatchCommandBuilder {
+    private static let batchSSHControlOptionKeys: Set<String> = [
+        "controlmaster",
+        "controlpersist",
+    ]
+
+    static func daemonTransportArguments(
+        configuration: WorkspaceRemoteConfiguration,
+        remotePath: String
+    ) -> [String] {
+        let script = "exec \(shellSingleQuoted(remotePath)) serve --stdio"
+        let command = "sh -c \(shellSingleQuoted(script))"
+        return ["-T"]
+            + batchArguments(configuration: configuration)
+            + ["-o", "RequestTTY=no", configuration.destination, command]
+    }
+
+    static func reverseRelayControlMasterArguments(
+        configuration: WorkspaceRemoteConfiguration,
+        controlCommand: String,
+        forwardSpec: String
+    ) -> [String]? {
+        guard let controlPath = sshOptionValue(named: "ControlPath", in: configuration.sshOptions)?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              !controlPath.isEmpty,
+              controlPath.lowercased() != "none" else {
+            return nil
+        }
+
+        var args = batchArguments(configuration: configuration)
+        args += ["-O", controlCommand, "-R", forwardSpec, configuration.destination]
+        return args
+    }
+
+    private static func batchArguments(configuration: WorkspaceRemoteConfiguration) -> [String] {
+        let effectiveSSHOptions = backgroundSSHOptions(configuration.sshOptions)
+        var args: [String] = [
+            "-o", "ConnectTimeout=6",
+            "-o", "ServerAliveInterval=20",
+            "-o", "ServerAliveCountMax=2",
+        ]
+        if !hasSSHOptionKey(effectiveSSHOptions, key: "StrictHostKeyChecking") {
+            args += ["-o", "StrictHostKeyChecking=accept-new"]
+        }
+        args += ["-o", "BatchMode=yes"]
+        // Batch helpers may reuse an existing ControlPath, but must not negotiate a new master.
+        args += ["-o", "ControlMaster=no"]
+        if let port = configuration.port {
+            args += ["-p", String(port)]
+        }
+        if let identityFile = configuration.identityFile,
+           !identityFile.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            args += ["-i", identityFile]
+        }
+        for option in effectiveSSHOptions {
+            args += ["-o", option]
+        }
+        return args
+    }
+
+    private static func hasSSHOptionKey(_ options: [String], key: String) -> Bool {
+        let loweredKey = key.lowercased()
+        for option in options {
+            if sshOptionKey(option) == loweredKey {
+                return true
+            }
+        }
+        return false
+    }
+
+    private static func normalizedSSHOptions(_ options: [String]) -> [String] {
+        options.compactMap { option in
+            let trimmed = option.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return nil }
+            return trimmed
+        }
+    }
+
+    private static func backgroundSSHOptions(_ options: [String]) -> [String] {
+        normalizedSSHOptions(options).filter { option in
+            guard let key = sshOptionKey(option) else { return false }
+            return !batchSSHControlOptionKeys.contains(key)
+        }
+    }
+
+    private static func sshOptionValue(named key: String, in options: [String]) -> String? {
+        let loweredKey = key.lowercased()
+        for option in normalizedSSHOptions(options) {
+            let parts = option.split(
+                maxSplits: 1,
+                omittingEmptySubsequences: true,
+                whereSeparator: { $0 == "=" || $0.isWhitespace }
+            )
+            guard parts.count == 2, parts[0].lowercased() == loweredKey else {
+                continue
+            }
+            let value = parts[1].trimmingCharacters(in: .whitespacesAndNewlines)
+            if !value.isEmpty {
+                return value
+            }
+        }
+        return nil
+    }
+
+    private static func sshOptionKey(_ option: String) -> String? {
+        let trimmed = option.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        return trimmed
+            .split(whereSeparator: { $0 == "=" || $0.isWhitespace })
+            .first
+            .map(String.init)?
+            .lowercased()
+    }
+
+    private static func shellSingleQuoted(_ value: String) -> String {
+        "'" + value.replacingOccurrences(of: "'", with: "'\"'\"'") + "'"
+    }
+}
+
 private final class WorkspaceRemoteDaemonRPCClient {
     private static let maxStdoutBufferBytes = 256 * 1024
     static let requiredProxyStreamCapability = "proxy.stream.push"
@@ -770,6 +1365,9 @@ private final class WorkspaceRemoteDaemonRPCClient {
     private let pendingCalls = WorkspaceRemoteDaemonPendingCallRegistry()
 
     private var process: Process?
+    private var stdinPipe: Pipe?
+    private var stdoutPipe: Pipe?
+    private var stderrPipe: Pipe?
     private var stdinHandle: FileHandle?
     private var stdoutHandle: FileHandle?
     private var stderrHandle: FileHandle?
@@ -795,6 +1393,12 @@ private final class WorkspaceRemoteDaemonRPCClient {
         let stdinPipe = Pipe()
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
+
+        stateQueue.sync {
+            self.stdinPipe = stdinPipe
+            self.stdoutPipe = stdoutPipe
+            self.stderrPipe = stderrPipe
+        }
 
         process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
         process.arguments = Self.daemonArguments(configuration: configuration, remotePath: remotePath)
@@ -1104,6 +1708,9 @@ private final class WorkspaceRemoteDaemonRPCClient {
 
         isClosed = true
         self.process = nil
+        stdinPipe = nil
+        stdoutPipe = nil
+        stderrPipe = nil
         stdinHandle = nil
         stdoutHandle?.readabilityHandler = nil
         stdoutHandle = nil
@@ -1133,6 +1740,9 @@ private final class WorkspaceRemoteDaemonRPCClient {
             let capturedStderr = stderrHandle
 
             process = nil
+            stdinPipe = nil
+            stdoutPipe = nil
+            stderrPipe = nil
             stdinHandle = nil
             stdoutHandle = nil
             stderrHandle = nil
@@ -1177,87 +1787,10 @@ private final class WorkspaceRemoteDaemonRPCClient {
     }
 
     private static func daemonArguments(configuration: WorkspaceRemoteConfiguration, remotePath: String) -> [String] {
-        let script = "exec \(shellSingleQuoted(remotePath)) serve --stdio"
-        // Use non-login sh so remote ~/.profile noise does not interfere with daemon transport startup.
-        let command = "sh -c \(shellSingleQuoted(script))"
-        return ["-T", "-S", "none"]
-            + sshCommonArguments(configuration: configuration, batchMode: true)
-            + ["-o", "RequestTTY=no", configuration.destination, command]
-    }
-
-    private static let batchSSHControlOptionKeys: Set<String> = [
-        "controlmaster",
-        "controlpersist",
-    ]
-
-    private static func sshCommonArguments(configuration: WorkspaceRemoteConfiguration, batchMode: Bool) -> [String] {
-        let effectiveSSHOptions: [String] = {
-            if batchMode {
-                return backgroundSSHOptions(configuration.sshOptions)
-            }
-            return normalizedSSHOptions(configuration.sshOptions)
-        }()
-        var args: [String] = [
-            "-o", "ConnectTimeout=6",
-            "-o", "ServerAliveInterval=20",
-            "-o", "ServerAliveCountMax=2",
-        ]
-        if !hasSSHOptionKey(effectiveSSHOptions, key: "StrictHostKeyChecking") {
-            args += ["-o", "StrictHostKeyChecking=accept-new"]
-        }
-        if batchMode {
-            args += ["-o", "BatchMode=yes"]
-            // Batch helpers should reuse an existing ControlPath if one was configured,
-            // but must never try to negotiate a new master connection.
-            args += ["-o", "ControlMaster=no"]
-        }
-        if let port = configuration.port {
-            args += ["-p", String(port)]
-        }
-        if let identityFile = configuration.identityFile,
-           !identityFile.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            args += ["-i", identityFile]
-        }
-        for option in effectiveSSHOptions {
-            args += ["-o", option]
-        }
-        return args
-    }
-
-    private static func hasSSHOptionKey(_ options: [String], key: String) -> Bool {
-        let loweredKey = key.lowercased()
-        for option in options {
-            let token = sshOptionKey(option)
-            if token == loweredKey {
-                return true
-            }
-        }
-        return false
-    }
-
-    private static func normalizedSSHOptions(_ options: [String]) -> [String] {
-        options.compactMap { option in
-            let trimmed = option.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty else { return nil }
-            return trimmed
-        }
-    }
-
-    private static func backgroundSSHOptions(_ options: [String]) -> [String] {
-        normalizedSSHOptions(options).filter { option in
-            guard let key = sshOptionKey(option) else { return false }
-            return !batchSSHControlOptionKeys.contains(key)
-        }
-    }
-
-    private static func sshOptionKey(_ option: String) -> String? {
-        let trimmed = option.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
-        return trimmed
-            .split(whereSeparator: { $0 == "=" || $0.isWhitespace })
-            .first
-            .map(String.init)?
-            .lowercased()
+        WorkspaceRemoteSSHBatchCommandBuilder.daemonTransportArguments(
+            configuration: configuration,
+            remotePath: remotePath
+        )
     }
 
     private static func shellSingleQuoted(_ value: String) -> String {
@@ -2191,6 +2724,7 @@ private final class WorkspaceRemoteProxyBroker {
         var tunnel: WorkspaceRemoteDaemonProxyTunnel?
         var endpoint: BrowserProxyEndpoint?
         var restartWorkItem: DispatchWorkItem?
+        var restartRetryCount = 0
         var subscribers: [UUID: (Update) -> Void] = [:]
 
         init(configuration: WorkspaceRemoteConfiguration, remotePath: String) {
@@ -2217,6 +2751,7 @@ private final class WorkspaceRemoteProxyBroker {
                 entry = existing
                 if existing.remotePath != remotePath {
                     existing.remotePath = remotePath
+                    existing.restartRetryCount = 0
                     if existing.tunnel != nil {
                         stopEntryRuntimeLocked(existing)
                         notifyLocked(existing, update: .connecting)
@@ -2260,12 +2795,13 @@ private final class WorkspaceRemoteProxyBroker {
             // Internal deterministic test hook used by docker regressions to force bind conflicts.
             localPort = forcedLocalPort
         } else {
+            let retryDelay = Self.retryDelay(baseDelay: 3.0, retry: entry.restartRetryCount + 1)
             guard let allocatedPort = Self.allocateLoopbackPort() else {
                 notifyLocked(
                     entry,
-                    update: .error("Failed to allocate local proxy port\(Self.retrySuffix(delay: 3.0))")
+                    update: .error("Failed to allocate local proxy port\(Self.retrySuffix(delay: retryDelay))")
                 )
-                scheduleRestartLocked(key: key, entry: entry, delay: 3.0)
+                scheduleRestartLocked(key: key, entry: entry, baseDelay: 3.0)
                 return
             }
             localPort = allocatedPort
@@ -2285,28 +2821,33 @@ private final class WorkspaceRemoteProxyBroker {
             entry.tunnel = tunnel
             let endpoint = BrowserProxyEndpoint(host: "127.0.0.1", port: localPort)
             entry.endpoint = endpoint
+            entry.restartRetryCount = 0
             notifyLocked(entry, update: .ready(endpoint))
         } catch {
             stopEntryRuntimeLocked(entry)
             let detail = "Failed to start local daemon proxy: \(error.localizedDescription)"
-            notifyLocked(entry, update: .error("\(detail)\(Self.retrySuffix(delay: 3.0))"))
-            scheduleRestartLocked(key: key, entry: entry, delay: 3.0)
+            let retryDelay = Self.retryDelay(baseDelay: 3.0, retry: entry.restartRetryCount + 1)
+            notifyLocked(entry, update: .error("\(detail)\(Self.retrySuffix(delay: retryDelay))"))
+            scheduleRestartLocked(key: key, entry: entry, baseDelay: 3.0)
         }
     }
 
     private func handleTunnelFailureLocked(key: String, detail: String) {
         guard let entry = entries[key], entry.tunnel != nil else { return }
         stopEntryRuntimeLocked(entry)
-        notifyLocked(entry, update: .error("\(detail)\(Self.retrySuffix(delay: 3.0))"))
-        scheduleRestartLocked(key: key, entry: entry, delay: 3.0)
+        let retryDelay = Self.retryDelay(baseDelay: 3.0, retry: entry.restartRetryCount + 1)
+        notifyLocked(entry, update: .error("\(detail)\(Self.retrySuffix(delay: retryDelay))"))
+        scheduleRestartLocked(key: key, entry: entry, baseDelay: 3.0)
     }
 
-    private func scheduleRestartLocked(key: String, entry: Entry, delay: TimeInterval) {
+    private func scheduleRestartLocked(key: String, entry: Entry, baseDelay: TimeInterval) {
         guard !entry.subscribers.isEmpty else {
             teardownEntryLocked(key: key, entry: entry)
             return
         }
         guard entry.restartWorkItem == nil else { return }
+        entry.restartRetryCount += 1
+        let retryDelay = Self.retryDelay(baseDelay: baseDelay, retry: entry.restartRetryCount)
 
         let workItem = DispatchWorkItem { [weak self] in
             guard let self, let currentEntry = self.entries[key] else { return }
@@ -2320,7 +2861,7 @@ private final class WorkspaceRemoteProxyBroker {
         }
 
         entry.restartWorkItem = workItem
-        queue.asyncAfter(deadline: .now() + delay, execute: workItem)
+        queue.asyncAfter(deadline: .now() + retryDelay, execute: workItem)
     }
 
     private func teardownEntryLocked(key: String, entry: Entry) {
@@ -2388,6 +2929,11 @@ private final class WorkspaceRemoteProxyBroker {
     private static func retrySuffix(delay: TimeInterval) -> String {
         let seconds = max(1, Int(delay.rounded()))
         return " (retry in \(seconds)s)"
+    }
+
+    private static func retryDelay(baseDelay: TimeInterval, retry: Int) -> TimeInterval {
+        let exponent = Double(max(0, retry - 1))
+        return min(baseDelay * pow(2.0, exponent), 60.0)
     }
 }
 
@@ -2872,6 +3418,34 @@ private final class WorkspaceRemoteCLIRelayServer {
 }
 
 final class WorkspaceRemoteSessionController {
+    enum PortScanKickReason: String {
+        case command
+        case refresh
+
+        var burstOffsets: [Double] {
+            switch self {
+            case .command:
+                return [0.5, 1.5, 3.0, 5.0, 7.5, 10.0]
+            case .refresh:
+                return [0.0]
+            }
+        }
+
+        func merged(with other: Self) -> Self {
+            switch (self, other) {
+            case (.command, _), (_, .command):
+                return .command
+            case (.refresh, .refresh):
+                return .refresh
+            }
+        }
+    }
+
+    private struct RetrySchedule {
+        let retry: Int
+        let delay: TimeInterval
+    }
+
     private struct CommandResult {
         let status: Int32
         let stdout: String
@@ -2901,6 +3475,34 @@ final class WorkspaceRemoteSessionController {
     private let configuration: WorkspaceRemoteConfiguration
     private let controllerID: UUID
 
+    private enum RemotePortPollingMode {
+        case hostWide
+        case hostWideDelta
+        case ttyScoped
+
+        var initialDelay: TimeInterval {
+            switch self {
+            case .hostWide:
+                return 0.5
+            case .hostWideDelta:
+                return 0.5
+            case .ttyScoped:
+                return 1.0
+            }
+        }
+
+        var repeatInterval: TimeInterval {
+            switch self {
+            case .hostWide:
+                return 2.0
+            case .hostWideDelta:
+                return 5.0
+            case .ttyScoped:
+                return 5.0
+            }
+        }
+    }
+
     private var isStopping = false
     private var proxyLease: WorkspaceRemoteProxyBroker.Lease?
     private var proxyEndpoint: BrowserProxyEndpoint?
@@ -2908,7 +3510,24 @@ final class WorkspaceRemoteSessionController {
     private var daemonBootstrapVersion: String?
     private var daemonRemotePath: String?
     private var reverseRelayProcess: Process?
+    private var reverseRelayControlMasterForwardSpec: String?
     private var cliRelayServer: WorkspaceRemoteCLIRelayServer?
+    private var remotePortScanTTYNames: [UUID: String] = [:]
+    private var remoteScannedPortsByPanel: [UUID: [Int]] = [:]
+    private var remotePortScanBurstActive = false
+    private var remotePortScanActiveReason: PortScanKickReason?
+    private var remotePortScanPendingReason: PortScanKickReason?
+    private var remotePortScanGeneration: UInt64 = 0
+    private var remotePortScanCoalesceWorkItem: DispatchWorkItem?
+    private var remotePortPollTimer: DispatchSourceTimer?
+    private var remotePortPollMode: RemotePortPollingMode?
+    private var polledRemotePorts: [Int] = []
+    private var remotePortPollBaselinePorts: Set<Int>?
+    private var keepPolledRemotePortsUntilTTYScan = false
+    private var bootstrapRemoteTTYResolved = false
+    private var bootstrapRemoteTTYRetryWorkItem: DispatchWorkItem?
+    private var bootstrapRemoteTTYFetchInFlight = false
+    private var bootstrapRemoteTTYRetryCount = 0
     private var reverseRelayStderrPipe: Pipe?
     private var reverseRelayRestartWorkItem: DispatchWorkItem?
     private var reverseRelayStderrBuffer = ""
@@ -2945,6 +3564,58 @@ final class WorkspaceRemoteSessionController {
         }
     }
 
+    func uploadDroppedFiles(
+        _ fileURLs: [URL],
+        operation: TerminalImageTransferOperation,
+        completion: @escaping (Result<[String], Error>) -> Void
+    ) {
+        queue.async { [weak self] in
+            guard let self else {
+                DispatchQueue.main.async {
+                    completion(.failure(RemoteDropUploadError.unavailable))
+                }
+                return
+            }
+
+            do {
+                try operation.throwIfCancelled()
+                let remotePaths = try self.uploadDroppedFilesLocked(fileURLs, operation: operation)
+                try operation.throwIfCancelled()
+                DispatchQueue.main.async { [weak self] in
+                    if operation.isCancelled {
+                        guard let self else {
+                            completion(.failure(TerminalImageTransferExecutionError.cancelled))
+                            return
+                        }
+                        self.queue.async { [weak self] in
+                            self?.cleanupUploadedRemotePaths(remotePaths)
+                            DispatchQueue.main.async {
+                                completion(.failure(TerminalImageTransferExecutionError.cancelled))
+                            }
+                        }
+                    } else {
+                        completion(.success(remotePaths))
+                    }
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    completion(.failure(error))
+                }
+            }
+        }
+    }
+
+    func uploadDroppedFiles(
+        _ fileURLs: [URL],
+        completion: @escaping (Result<[String], Error>) -> Void
+    ) {
+        uploadDroppedFiles(
+            fileURLs,
+            operation: TerminalImageTransferOperation(),
+            completion: completion
+        )
+    }
+
     private func stopAllLocked() {
         debugLog("remote.session.stop \(debugConfigSummary())")
         isStopping = true
@@ -2953,7 +3624,24 @@ final class WorkspaceRemoteSessionController {
         reconnectRetryCount = 0
         reverseRelayRestartWorkItem?.cancel()
         reverseRelayRestartWorkItem = nil
+        remotePortScanCoalesceWorkItem?.cancel()
+        remotePortScanCoalesceWorkItem = nil
         stopReverseRelayLocked()
+        remotePortScanGeneration &+= 1
+        remotePortScanBurstActive = false
+        remotePortScanActiveReason = nil
+        remotePortScanPendingReason = nil
+        remotePortScanTTYNames.removeAll()
+        remoteScannedPortsByPanel.removeAll()
+        stopRemotePortPollingLocked()
+        polledRemotePorts = []
+        remotePortPollBaselinePorts = nil
+        keepPolledRemotePortsUntilTTYScan = false
+        bootstrapRemoteTTYResolved = false
+        bootstrapRemoteTTYRetryWorkItem?.cancel()
+        bootstrapRemoteTTYRetryWorkItem = nil
+        bootstrapRemoteTTYFetchInFlight = false
+        bootstrapRemoteTTYRetryCount = 0
 
         proxyLease?.release()
         proxyLease = nil
@@ -2968,9 +3656,20 @@ final class WorkspaceRemoteSessionController {
     private func beginConnectionAttemptLocked() {
         guard !isStopping else { return }
 
+        Self.killOrphanedRemoteSSHProcesses(
+            destination: configuration.destination,
+            relayPort: configuration.relayPort
+        )
         connectionAttemptStartedAt = Date()
         debugLog("remote.session.connect.begin retry=\(reconnectRetryCount) \(debugConfigSummary())")
         reconnectWorkItem = nil
+        bootstrapRemoteTTYRetryWorkItem?.cancel()
+        bootstrapRemoteTTYRetryWorkItem = nil
+        bootstrapRemoteTTYFetchInFlight = false
+        if remotePortScanTTYNames.isEmpty {
+            bootstrapRemoteTTYResolved = false
+            bootstrapRemoteTTYRetryCount = 0
+        }
         let connectDetail: String
         let bootstrapDetail: String
         if reconnectRetryCount > 0 {
@@ -3002,13 +3701,14 @@ final class WorkspaceRemoteSessionController {
             )
             recordHeartbeatActivityLocked()
             startReverseRelayLocked(remotePath: hello.remotePath)
+            requestBootstrapRemoteTTYIfNeededLocked()
             startProxyLocked()
         } catch {
             daemonReady = false
             daemonBootstrapVersion = nil
             daemonRemotePath = nil
-            let nextRetry = scheduleReconnectLocked(delay: 4.0)
-            let retrySuffix = Self.retrySuffix(retry: nextRetry, delay: 4.0)
+            let retrySchedule = scheduleReconnectLocked(baseDelay: 4.0)
+            let retrySuffix = Self.retrySuffix(retry: retrySchedule.retry, delay: retrySchedule.delay)
             let detail = "Remote daemon bootstrap failed: \(error.localizedDescription)\(retrySuffix)"
             publishDaemonStatus(.error, detail: detail)
             publishState(.error, detail: detail)
@@ -3021,8 +3721,8 @@ final class WorkspaceRemoteSessionController {
         guard proxyLease == nil else { return }
         guard let remotePath = daemonRemotePath,
               !remotePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            let nextRetry = scheduleReconnectLocked(delay: 4.0)
-            let retrySuffix = Self.retrySuffix(retry: nextRetry, delay: 4.0)
+            let retrySchedule = scheduleReconnectLocked(baseDelay: 4.0)
+            let retrySuffix = Self.retrySuffix(retry: retrySchedule.retry, delay: retrySchedule.delay)
             let detail = "Remote daemon did not provide a valid remote path\(retrySuffix)"
             publishDaemonStatus(.error, detail: detail)
             publishState(.error, detail: detail)
@@ -3054,6 +3754,7 @@ final class WorkspaceRemoteSessionController {
             return
         }
         guard reverseRelayProcess == nil else { return }
+        guard reverseRelayControlMasterForwardSpec == nil else { return }
 
         reverseRelayRestartWorkItem?.cancel()
         reverseRelayRestartWorkItem = nil
@@ -3066,7 +3767,35 @@ final class WorkspaceRemoteSessionController {
             )
             relayServer = server
             let localRelayPort = try server.start()
-            Self.killOrphanedRelayProcesses(relayPort: relayPort, destination: configuration.destination)
+            Self.killOrphanedRemoteSSHProcesses(
+                destination: configuration.destination,
+                relayPort: relayPort
+            )
+            let forwardSpec = "127.0.0.1:\(relayPort):127.0.0.1:\(localRelayPort)"
+
+            if startReverseRelayViaControlMasterLocked(forwardSpec: forwardSpec) {
+                cliRelayServer = relayServer
+                reverseRelayStderrBuffer = ""
+                do {
+                    try installRemoteRelayMetadataLocked(
+                        remotePath: remotePath,
+                        relayPort: relayPort,
+                        relayID: relayID,
+                        relayToken: relayToken
+                    )
+                } catch {
+                    debugLog("remote.relay.metadata.error \(error.localizedDescription)")
+                    stopReverseRelayLocked()
+                    scheduleReverseRelayRestartLocked(remotePath: remotePath, delay: 2.0)
+                    return
+                }
+                recordHeartbeatActivityLocked()
+                debugLog(
+                    "remote.relay.start relayPort=\(relayPort) localRelayPort=\(localRelayPort) " +
+                    "target=\(configuration.displayTarget) controlMaster=1"
+                )
+                return
+            }
 
             let process = Process()
             let stderrPipe = Pipe()
@@ -3122,7 +3851,7 @@ final class WorkspaceRemoteSessionController {
             recordHeartbeatActivityLocked()
             debugLog(
                 "remote.relay.start relayPort=\(relayPort) localRelayPort=\(localRelayPort) " +
-                "target=\(configuration.displayTarget)"
+                "target=\(configuration.displayTarget) controlMaster=0"
             )
         } catch {
             debugLog(
@@ -3192,6 +3921,7 @@ final class WorkspaceRemoteSessionController {
             reverseRelayProcess.terminate()
         }
         reverseRelayProcess = nil
+        stopReverseRelayViaControlMasterLocked()
         reverseRelayStderrPipe = nil
         reverseRelayStderrBuffer = ""
         cliRelayServer?.stop()
@@ -3218,14 +3948,26 @@ final class WorkspaceRemoteSessionController {
             }
             proxyEndpoint = endpoint
             publishProxyEndpoint(endpoint)
+            updateRemotePortPollingStateLocked()
             publishPortsSnapshotLocked()
             publishState(
                 .connected,
                 detail: "Connected to \(configuration.displayTarget) via shared local proxy \(endpoint.host):\(endpoint.port)"
             )
+            requestBootstrapRemoteTTYIfNeededLocked()
             recordHeartbeatActivityLocked()
         case .error(let detail):
             debugLog("remote.proxy.error detail=\(detail) \(debugConfigSummary())")
+            remotePortScanGeneration &+= 1
+            remotePortScanBurstActive = false
+            remotePortScanActiveReason = nil
+            remotePortScanPendingReason = nil
+            remotePortScanCoalesceWorkItem?.cancel()
+            remotePortScanCoalesceWorkItem = nil
+            remoteScannedPortsByPanel.removeAll()
+            stopRemotePortPollingLocked()
+            polledRemotePorts = []
+            keepPolledRemotePortsUntilTTYScan = false
             proxyEndpoint = nil
             publishProxyEndpoint(nil)
             publishPortsSnapshotLocked()
@@ -3238,8 +3980,8 @@ final class WorkspaceRemoteSessionController {
             daemonBootstrapVersion = nil
             daemonRemotePath = nil
 
-            let nextRetry = scheduleReconnectLocked(delay: 2.0)
-            let retrySuffix = Self.retrySuffix(retry: nextRetry, delay: 2.0)
+            let retrySchedule = scheduleReconnectLocked(baseDelay: 2.0)
+            let retrySuffix = Self.retrySuffix(retry: retrySchedule.retry, delay: retrySchedule.delay)
             publishDaemonStatus(
                 .error,
                 detail: "Remote daemon transport needs re-bootstrap after proxy failure\(retrySuffix)"
@@ -3248,11 +3990,12 @@ final class WorkspaceRemoteSessionController {
     }
 
     @discardableResult
-    private func scheduleReconnectLocked(delay: TimeInterval) -> Int {
-        guard !isStopping else { return reconnectRetryCount }
+    private func scheduleReconnectLocked(baseDelay: TimeInterval) -> RetrySchedule {
+        let retryNumber = reconnectRetryCount + 1
+        let retryDelay = Self.retryDelay(baseDelay: baseDelay, retry: retryNumber)
+        guard !isStopping else { return RetrySchedule(retry: retryNumber, delay: retryDelay) }
         reconnectWorkItem?.cancel()
-        reconnectRetryCount += 1
-        let retryNumber = reconnectRetryCount
+        reconnectRetryCount = retryNumber
         let workItem = DispatchWorkItem { [weak self] in
             guard let self else { return }
             self.reconnectWorkItem = nil
@@ -3261,8 +4004,8 @@ final class WorkspaceRemoteSessionController {
             self.beginConnectionAttemptLocked()
         }
         reconnectWorkItem = workItem
-        queue.asyncAfter(deadline: .now() + delay, execute: workItem)
-        return retryNumber
+        queue.asyncAfter(deadline: .now() + retryDelay, execute: workItem)
+        return RetrySchedule(retry: retryNumber, delay: retryDelay)
     }
 
     private func publishState(_ state: WorkspaceRemoteConnectionState, detail: String?) {
@@ -3316,11 +4059,19 @@ final class WorkspaceRemoteSessionController {
 
     private func publishPortsSnapshotLocked() {
         let controllerID = self.controllerID
+        let detectedByPanel = remotePortScanTTYNames.keys.reduce(into: [UUID: [Int]]()) { result, panelId in
+            result[panelId] = remoteScannedPortsByPanel[panelId] ?? []
+        }
+        let detected = Array(
+            Set(polledRemotePorts)
+                .union(detectedByPanel.values.flatMap { $0 })
+        ).sorted()
         DispatchQueue.main.async { [weak workspace] in
             guard let workspace else { return }
             guard workspace.activeRemoteSessionControllerID == controllerID else { return }
-            workspace.applyRemotePortsSnapshot(
-                detected: [],
+            workspace.applyRemoteDetectedSurfacePortsSnapshot(
+                detectedByPanel: detectedByPanel,
+                detected: detected,
                 forwarded: [],
                 conflicts: [],
                 target: workspace.remoteDisplayTarget ?? "remote host"
@@ -3342,10 +4093,76 @@ final class WorkspaceRemoteSessionController {
         }
     }
 
+    private func requestBootstrapRemoteTTYIfNeededLocked() {
+        guard !bootstrapRemoteTTYResolved else { return }
+        guard let relayPort = configuration.relayPort, relayPort > 0 else { return }
+        if !remotePortScanTTYNames.isEmpty {
+            bootstrapRemoteTTYResolved = true
+            bootstrapRemoteTTYRetryWorkItem?.cancel()
+            bootstrapRemoteTTYRetryWorkItem = nil
+            bootstrapRemoteTTYRetryCount = 0
+            return
+        }
+        guard !bootstrapRemoteTTYFetchInFlight else { return }
+        bootstrapRemoteTTYFetchInFlight = true
+        defer { bootstrapRemoteTTYFetchInFlight = false }
+
+        let command = "sh -c \(Self.shellSingleQuoted("tty_path=\"$HOME/.cmux/relay/\(relayPort).tty\"; if [ -r \"$tty_path\" ]; then cat \"$tty_path\"; fi"))"
+        do {
+            let result = try sshExec(
+                arguments: sshCommonArguments(batchMode: true) + [configuration.destination, command],
+                timeout: 2
+            )
+            guard result.status == 0 else {
+                scheduleBootstrapRemoteTTYRetryLocked()
+                return
+            }
+            guard let ttyName = Self.normalizedRemotePortScanTTYName(result.stdout) else {
+                scheduleBootstrapRemoteTTYRetryLocked()
+                return
+            }
+            bootstrapRemoteTTYResolved = true
+            bootstrapRemoteTTYRetryWorkItem?.cancel()
+            bootstrapRemoteTTYRetryWorkItem = nil
+            bootstrapRemoteTTYRetryCount = 0
+            debugLog("remote.tty.bootstrap.ready tty=\(ttyName) \(debugConfigSummary())")
+            publishBootstrapRemoteTTY(ttyName)
+        } catch {
+            debugLog("remote.tty.bootstrap.failed error=\(error.localizedDescription) \(debugConfigSummary())")
+            scheduleBootstrapRemoteTTYRetryLocked()
+        }
+    }
+
+    private func scheduleBootstrapRemoteTTYRetryLocked() {
+        guard !isStopping else { return }
+        guard daemonReady else { return }
+        guard !bootstrapRemoteTTYResolved else { return }
+        guard remotePortScanTTYNames.isEmpty else { return }
+        guard bootstrapRemoteTTYRetryCount < Self.bootstrapRemoteTTYRetryLimit else { return }
+        guard bootstrapRemoteTTYRetryWorkItem == nil else { return }
+
+        bootstrapRemoteTTYRetryCount += 1
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.bootstrapRemoteTTYRetryWorkItem = nil
+            self.requestBootstrapRemoteTTYIfNeededLocked()
+        }
+        bootstrapRemoteTTYRetryWorkItem = workItem
+        queue.asyncAfter(deadline: .now() + Self.bootstrapRemoteTTYRetryDelay, execute: workItem)
+    }
+
+    private func publishBootstrapRemoteTTY(_ ttyName: String) {
+        let controllerID = self.controllerID
+        DispatchQueue.main.async { [weak workspace] in
+            guard let workspace else { return }
+            guard workspace.activeRemoteSessionControllerID == controllerID else { return }
+            workspace.applyBootstrapRemoteTTY(ttyName)
+        }
+    }
+
     private func reverseRelayArguments(relayPort: Int, localRelayPort: Int) -> [String] {
-        // `-o ControlPath=none` is not enough on macOS OpenSSH, the client can still
-        // attach to an existing master and exit immediately with its status.
-        // `-S none` forces a standalone transport for the reverse relay.
+        // Fallback standalone transport when dynamic forwarding through an existing
+        // control master is unavailable.
         var args: [String] = ["-N", "-T", "-S", "none"]
         args += sshCommonArguments(batchMode: true)
         args += [
@@ -3357,9 +4174,49 @@ final class WorkspaceRemoteSessionController {
         return args
     }
 
+    private func startReverseRelayViaControlMasterLocked(forwardSpec: String) -> Bool {
+        guard let arguments = WorkspaceRemoteSSHBatchCommandBuilder.reverseRelayControlMasterArguments(
+            configuration: configuration,
+            controlCommand: "forward",
+            forwardSpec: forwardSpec
+        ) else {
+            return false
+        }
+
+        do {
+            let result = try sshExec(arguments: arguments, timeout: 6)
+            guard result.status == 0 else {
+                let detail = Self.bestErrorLine(stderr: result.stderr, stdout: result.stdout)
+                    ?? "ssh exited \(result.status)"
+                debugLog("remote.relay.controlmaster.forwardFailed \(detail) \(debugConfigSummary())")
+                return false
+            }
+            reverseRelayControlMasterForwardSpec = forwardSpec
+            return true
+        } catch {
+            debugLog("remote.relay.controlmaster.forwardFailed \(error.localizedDescription) \(debugConfigSummary())")
+            return false
+        }
+    }
+
+    private func stopReverseRelayViaControlMasterLocked() {
+        guard let forwardSpec = reverseRelayControlMasterForwardSpec else { return }
+        reverseRelayControlMasterForwardSpec = nil
+        guard let arguments = WorkspaceRemoteSSHBatchCommandBuilder.reverseRelayControlMasterArguments(
+            configuration: configuration,
+            controlCommand: "cancel",
+            forwardSpec: forwardSpec
+        ) else {
+            return
+        }
+        _ = try? sshExec(arguments: arguments, timeout: 4)
+    }
+
     private static let remotePlatformProbeOSMarker = "__CMUX_REMOTE_OS__="
     private static let remotePlatformProbeArchMarker = "__CMUX_REMOTE_ARCH__="
     private static let remotePlatformProbeExistsMarker = "__CMUX_REMOTE_EXISTS__="
+    private static let bootstrapRemoteTTYRetryDelay: TimeInterval = 0.5
+    private static let bootstrapRemoteTTYRetryLimit = 8
 
     private func sshCommonArguments(batchMode: Bool) -> [String] {
         let effectiveSSHOptions: [String] = {
@@ -3442,12 +4299,17 @@ final class WorkspaceRemoteSessionController {
         )
     }
 
-    private func scpExec(arguments: [String], timeout: TimeInterval = 30) throws -> CommandResult {
+    private func scpExec(
+        arguments: [String],
+        timeout: TimeInterval = 30,
+        operation: TerminalImageTransferOperation? = nil
+    ) throws -> CommandResult {
         try runProcess(
             executable: "/usr/bin/scp",
             arguments: arguments,
             stdin: nil,
-            timeout: timeout
+            timeout: timeout,
+            operation: operation
         )
     }
 
@@ -3457,7 +4319,8 @@ final class WorkspaceRemoteSessionController {
         environment: [String: String]? = nil,
         currentDirectory: URL? = nil,
         stdin: Data?,
-        timeout: TimeInterval
+        timeout: TimeInterval,
+        operation: TerminalImageTransferOperation? = nil
     ) throws -> CommandResult {
         debugLog(
             "remote.proc.start exec=\(URL(fileURLWithPath: executable).lastPathComponent) " +
@@ -3512,6 +4375,7 @@ final class WorkspaceRemoteSessionController {
         }
 
         do {
+            try operation?.throwIfCancelled()
             try process.run()
         } catch {
             try? stdoutPipe.fileHandleForWriting.close()
@@ -3526,20 +4390,34 @@ final class WorkspaceRemoteSessionController {
         }
         try? stdoutPipe.fileHandleForWriting.close()
         try? stderrPipe.fileHandleForWriting.close()
+        operation?.installCancellationHandler {
+            if process.isRunning {
+                process.terminate()
+            }
+        }
+        defer { operation?.clearCancellationHandler() }
 
         if let stdin, let pipe = process.standardInput as? Pipe {
             pipe.fileHandleForWriting.write(stdin)
             try? pipe.fileHandleForWriting.close()
         }
 
-        let didExitBeforeTimeout = exitSemaphore.wait(timeout: .now() + max(0, timeout)) == .success
-        if !didExitBeforeTimeout, process.isRunning {
+        func terminateProcessAndWait() {
             process.terminate()
             let terminatedGracefully = exitSemaphore.wait(timeout: .now() + 2.0) == .success
             if !terminatedGracefully, process.isRunning {
                 _ = Darwin.kill(process.processIdentifier, SIGKILL)
                 process.waitUntilExit()
             }
+        }
+
+        let didExitBeforeTimeout = exitSemaphore.wait(timeout: .now() + max(0, timeout)) == .success
+        if !didExitBeforeTimeout, process.isRunning {
+            if operation?.isCancelled == true {
+                terminateProcessAndWait()
+                throw TerminalImageTransferExecutionError.cancelled
+            }
+            terminateProcessAndWait()
             debugLog(
                 "remote.proc.timeout exec=\(URL(fileURLWithPath: executable).lastPathComponent) " +
                 "timeout=\(Int(timeout)) args=\(debugShellCommand(executable: executable, arguments: arguments))"
@@ -3554,6 +4432,9 @@ final class WorkspaceRemoteSessionController {
         try? stderrHandle.close()
         let stdout = String(data: stdoutData, encoding: .utf8) ?? ""
         let stderr = String(data: stderrData, encoding: .utf8) ?? ""
+        if operation?.isCancelled == true {
+            throw TerminalImageTransferExecutionError.cancelled
+        }
         debugLog(
             "remote.proc.end exec=\(URL(fileURLWithPath: executable).lastPathComponent) " +
             "status=\(process.terminationStatus) stdout=\(Self.debugLogSnippet(stdout)) " +
@@ -3672,7 +4553,7 @@ final class WorkspaceRemoteSessionController {
         if [ -r "$socket_addr_file" ] && [ "$(tr -d '\\r\\n' < "$socket_addr_file")" = "$relay_socket" ]; then
           rm -f "$socket_addr_file"
         fi
-        rm -f "$HOME/.cmux/relay/\(relayPort).auth" "$HOME/.cmux/relay/\(relayPort).daemon_path"
+        rm -f "$HOME/.cmux/relay/\(relayPort).auth" "$HOME/.cmux/relay/\(relayPort).daemon_path" "$HOME/.cmux/relay/\(relayPort).tty"
         """
     }
 
@@ -3806,7 +4687,29 @@ final class WorkspaceRemoteSessionController {
             .appendingPathComponent("cmuxd-remote", isDirectory: false)
     }
 
-    private func downloadRemoteDaemonBinaryLocked(entry: WorkspaceRemoteDaemonManifest.Entry, version: String) throws -> URL {
+    /// Fetch the live manifest JSON from the release, returning nil on any failure.
+    private static func fetchRemoteManifestLocked(releaseURL: String, version: String) -> WorkspaceRemoteDaemonManifest? {
+        guard let manifestURL = URL(string: "\(releaseURL)/cmuxd-remote-manifest.json") else { return nil }
+        let request = NSMutableURLRequest(url: manifestURL)
+        request.timeoutInterval = 15
+        request.setValue("cmux/\(version)", forHTTPHeaderField: "User-Agent")
+        let session = URLSession(configuration: .ephemeral)
+        let semaphore = DispatchSemaphore(value: 0)
+        var resultData: Data?
+        session.dataTask(with: request as URLRequest) { data, response, error in
+            defer { semaphore.signal() }
+            guard error == nil,
+                  let httpResponse = response as? HTTPURLResponse,
+                  (200...299).contains(httpResponse.statusCode) else { return }
+            resultData = data
+        }.resume()
+        _ = semaphore.wait(timeout: .now() + 20.0)
+        session.finishTasksAndInvalidate()
+        guard let data = resultData else { return nil }
+        return try? JSONDecoder().decode(WorkspaceRemoteDaemonManifest.self, from: data)
+    }
+
+    private func downloadRemoteDaemonBinaryLocked(entry: WorkspaceRemoteDaemonManifest.Entry, version: String, releaseURL: String? = nil) throws -> URL {
         guard let url = URL(string: entry.downloadURL) else {
             throw NSError(domain: "cmux.remote.daemon", code: 25, userInfo: [
                 NSLocalizedDescriptionKey: "remote daemon manifest has an invalid download URL",
@@ -3853,10 +4756,21 @@ final class WorkspaceRemoteSessionController {
         }
 
         let downloadedSHA = try Self.sha256Hex(forFile: downloadedURL)
-        guard downloadedSHA == entry.sha256.lowercased() else {
-            throw NSError(domain: "cmux.remote.daemon", code: 28, userInfo: [
-                NSLocalizedDescriptionKey: "remote daemon checksum mismatch for \(entry.assetName)",
-            ])
+        if downloadedSHA != entry.sha256.lowercased() {
+            // The embedded manifest's checksum doesn't match the downloaded binary.
+            // This can happen when a newer nightly overwrites the shared release
+            // asset after this build's manifest was embedded. As a fallback, fetch
+            // the live manifest from the release and verify against that.
+            if let releaseURL,
+               let liveManifest = Self.fetchRemoteManifestLocked(releaseURL: releaseURL, version: version),
+               let liveEntry = liveManifest.entry(goOS: entry.goOS, goArch: entry.goArch),
+               downloadedSHA == liveEntry.sha256.lowercased() {
+                debugLog("remote.download.checksum-fallback: embedded manifest checksum stale, live manifest matched for \(entry.assetName)")
+            } else {
+                throw NSError(domain: "cmux.remote.daemon", code: 28, userInfo: [
+                    NSLocalizedDescriptionKey: "remote daemon checksum mismatch for \(entry.assetName)",
+                ])
+            }
         }
 
         let tempURL = cacheURL.deletingLastPathComponent()
@@ -3889,7 +4803,7 @@ final class WorkspaceRemoteSessionController {
                 }
                 try? FileManager.default.removeItem(at: cacheURL)
             }
-            let downloadedURL = try downloadRemoteDaemonBinaryLocked(entry: entry, version: manifest.appVersion)
+            let downloadedURL = try downloadRemoteDaemonBinaryLocked(entry: entry, version: manifest.appVersion, releaseURL: manifest.releaseURL)
             debugLog("remote.build.downloaded path=\(downloadedURL.path)")
             return downloadedURL
         }
@@ -4005,6 +4919,70 @@ final class WorkspaceRemoteSessionController {
         }
     }
 
+    private func uploadDroppedFilesLocked(
+        _ fileURLs: [URL],
+        operation: TerminalImageTransferOperation
+    ) throws -> [String] {
+        guard !fileURLs.isEmpty else { return [] }
+
+        let scpSSHOptions = backgroundSSHOptions(configuration.sshOptions)
+        var uploadedRemotePaths: [String] = []
+        do {
+            for localURL in fileURLs {
+                try operation.throwIfCancelled()
+                let normalizedLocalURL = localURL.standardizedFileURL
+                guard normalizedLocalURL.isFileURL else {
+                    throw RemoteDropUploadError.invalidFileURL
+                }
+
+                let remotePath = Self.remoteDropPath(for: normalizedLocalURL)
+                uploadedRemotePaths.append(remotePath)
+                var scpArgs: [String] = ["-q", "-o", "ControlMaster=no"]
+                if !hasSSHOptionKey(scpSSHOptions, key: "StrictHostKeyChecking") {
+                    scpArgs += ["-o", "StrictHostKeyChecking=accept-new"]
+                }
+                if let port = configuration.port {
+                    scpArgs += ["-P", String(port)]
+                }
+                if let identityFile = configuration.identityFile,
+                   !identityFile.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    scpArgs += ["-i", identityFile]
+                }
+                for option in scpSSHOptions {
+                    scpArgs += ["-o", option]
+                }
+                scpArgs += [normalizedLocalURL.path, "\(configuration.destination):\(remotePath)"]
+
+                let scpResult = try scpExec(arguments: scpArgs, timeout: 45, operation: operation)
+                guard scpResult.status == 0 else {
+                    let detail = Self.bestErrorLine(stderr: scpResult.stderr, stdout: scpResult.stdout) ??
+                        "scp exited \(scpResult.status)"
+                    throw RemoteDropUploadError.uploadFailed(detail)
+                }
+            }
+            return uploadedRemotePaths
+        } catch {
+            cleanupUploadedRemotePaths(uploadedRemotePaths)
+            throw error
+        }
+    }
+
+    static func remoteDropPath(for fileURL: URL, uuid: UUID = UUID()) -> String {
+        let extensionSuffix = fileURL.pathExtension.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lowercasedSuffix = extensionSuffix.isEmpty ? "" : ".\(extensionSuffix.lowercased())"
+        return "/tmp/cmux-drop-\(uuid.uuidString.lowercased())\(lowercasedSuffix)"
+    }
+
+    private func cleanupUploadedRemotePaths(_ remotePaths: [String]) {
+        guard !remotePaths.isEmpty else { return }
+        let cleanupScript = "rm -f -- " + remotePaths.map(Self.shellSingleQuoted).joined(separator: " ")
+        let cleanupCommand = "sh -c \(Self.shellSingleQuoted(cleanupScript))"
+        _ = try? sshExec(
+            arguments: sshCommonArguments(batchMode: true) + [configuration.destination, cleanupCommand],
+            timeout: 8
+        )
+    }
+
     private func helloRemoteDaemonLocked(remotePath: String) throws -> DaemonHello {
         let request = #"{"id":1,"method":"hello","params":{}}"#
         let script = "printf '%s\\n' \(Self.shellSingleQuoted(request)) | \(Self.shellSingleQuoted(remotePath)) serve --stdio"
@@ -4057,7 +5035,7 @@ final class WorkspaceRemoteSessionController {
 
     private func debugLog(_ message: @autoclosure () -> String) {
 #if DEBUG
-        dlog(message())
+        cmuxDebugLog(message())
 #endif
     }
 
@@ -4108,8 +5086,8 @@ final class WorkspaceRemoteSessionController {
 
     static func remoteCLIWrapperScript() -> String {
         """
-        #!/usr/bin/env bash
-        set -euo pipefail
+        #!/bin/sh
+        set -eu
 
         daemon="$HOME/.cmux/bin/cmuxd-remote-current"
         socket_path="${CMUX_SOCKET_PATH:-}"
@@ -4256,24 +5234,218 @@ final class WorkspaceRemoteSessionController {
         ".cmux/bin/cmuxd-remote/\(version)/\(goOS)-\(goArch)/cmuxd-remote"
     }
 
-    private static func killOrphanedRelayProcesses(relayPort: Int, destination: String) {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
-        process.arguments = ["-f", "ssh.*-R.*127\\.0\\.0\\.1:\(relayPort):127\\.0\\.0\\.1:[0-9]+.*\(destination)"]
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-        do {
-            try process.run()
-            process.waitUntilExit()
-        } catch {
-            // Best effort cleanup only.
+    static func orphanedCMUXRemoteSSHPIDs(
+        psOutput: String,
+        destination: String,
+        relayPort: Int? = nil
+    ) -> [Int] {
+        let trimmedDestination = destination.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedDestination.isEmpty else { return [] }
+
+        return psOutput
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .compactMap { line -> Int? in
+                guard let parsed = parsePSLine(line) else { return nil }
+                guard parsed.ppid == 1 else { return nil }
+                guard isOrphanedCMUXRemoteSSHCommand(
+                    parsed.command,
+                    destination: trimmedDestination,
+                    relayPort: relayPort
+                ) else {
+                    return nil
+                }
+                return parsed.pid
+            }
+            .sorted()
+    }
+
+    private static func killOrphanedRemoteSSHProcesses(destination: String, relayPort: Int? = nil) {
+        guard let output = captureCommandStandardOutput(
+            executablePath: "/bin/ps",
+            arguments: ["-axo", "pid=,ppid=,command="]
+        ) else {
+            return
+        }
+
+        for pid in orphanedCMUXRemoteSSHPIDs(
+            psOutput: output,
+            destination: destination,
+            relayPort: relayPort
+        ) {
+            _ = Darwin.kill(pid_t(pid), SIGTERM)
         }
     }
 
+    private static func captureCommandStandardOutput(
+        executablePath: String,
+        arguments: [String]
+    ) -> String? {
+        let process = Process()
+        let stdoutPipe = Pipe()
+        process.executableURL = URL(fileURLWithPath: executablePath)
+        process.arguments = arguments
+        process.standardOutput = stdoutPipe
+        process.standardError = FileHandle.nullDevice
+
+        do {
+            try process.run()
+            let outputData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            guard process.terminationStatus == 0,
+                  let output = String(data: outputData, encoding: .utf8),
+                  !output.isEmpty else {
+                return nil
+            }
+            return output
+        } catch {
+            // Best effort cleanup only.
+            return nil
+        }
+    }
+
+    private static func parsePSLine(_ line: Substring) -> (pid: Int, ppid: Int, command: String)? {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        let scanner = Scanner(string: trimmed)
+        var pidValue: Int = 0
+        var ppidValue: Int = 0
+        guard scanner.scanInt(&pidValue), scanner.scanInt(&ppidValue) else {
+            return nil
+        }
+
+        let commandStart = scanner.currentIndex
+        let command = String(trimmed[commandStart...]).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !command.isEmpty else { return nil }
+        return (pidValue, ppidValue, command)
+    }
+
+    private static func isOrphanedCMUXRemoteSSHCommand(
+        _ command: String,
+        destination: String,
+        relayPort: Int?
+    ) -> Bool {
+        let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        guard trimmed.hasPrefix("/usr/bin/ssh ") || trimmed.hasPrefix("ssh ") else { return false }
+        guard commandContainsDestination(trimmed, destination: destination) else { return false }
+
+        if let relayPort {
+            return trimmed.contains(" -N ")
+                && trimmed.contains(" -R 127.0.0.1:\(relayPort):127.0.0.1:")
+        }
+
+        if trimmed.contains(" -N ") && trimmed.contains(" -R 127.0.0.1:") {
+            return true
+        }
+        if trimmed.contains("cmuxd-remote") && trimmed.contains(" serve --stdio") {
+            return true
+        }
+        return false
+    }
+
+    private static func commandContainsDestination(_ command: String, destination: String) -> Bool {
+        guard !destination.isEmpty else { return false }
+        let escaped = NSRegularExpression.escapedPattern(for: destination)
+        guard let regex = try? NSRegularExpression(
+            pattern: "(^|[\\s'\\\"])\(escaped)($|[\\s'\\\"])",
+            options: []
+        ) else {
+            return command.contains(destination)
+        }
+        let range = NSRange(command.startIndex..<command.endIndex, in: command)
+        return regex.firstMatch(in: command, options: [], range: range) != nil
+    }
+
+    static func executableSearchPaths(
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        pathHelperOutput: String? = nil
+    ) -> [String] {
+        var ordered: [String] = []
+        var seen: Set<String> = []
+
+        func appendSearchPath(_ rawPath: String?) {
+            guard let rawPath else { return }
+            let trimmed = rawPath.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return }
+            guard seen.insert(trimmed).inserted else { return }
+            ordered.append(trimmed)
+        }
+
+        if let path = environment["PATH"] {
+            for component in path.split(separator: ":") {
+                appendSearchPath(String(component))
+            }
+        }
+
+        if let home = environment["HOME"], !home.isEmpty {
+            appendSearchPath((home as NSString).appendingPathComponent(".local/bin"))
+            appendSearchPath((home as NSString).appendingPathComponent("go/bin"))
+            appendSearchPath((home as NSString).appendingPathComponent("bin"))
+        }
+
+        let helperOutput = pathHelperOutput ?? pathHelperShellOutput()
+        for component in parsePathHelperPaths(helperOutput) {
+            appendSearchPath(component)
+        }
+
+        for component in [
+            "/opt/homebrew/bin",
+            "/opt/homebrew/sbin",
+            "/usr/local/bin",
+            "/usr/local/sbin",
+            "/usr/bin",
+            "/bin",
+            "/usr/sbin",
+            "/sbin",
+        ] {
+            appendSearchPath(component)
+        }
+
+        return ordered
+    }
+
+    static func parsePathHelperPaths(_ output: String) -> [String] {
+        for fragment in output.split(whereSeparator: { $0 == "\n" || $0 == ";" }) {
+            let trimmed = fragment.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmed.hasPrefix("PATH=\"") else { continue }
+            let suffix = trimmed.dropFirst("PATH=\"".count)
+            guard let closingQuote = suffix.firstIndex(of: "\"") else { return [] }
+            return suffix[..<closingQuote]
+                .split(separator: ":")
+                .map(String.init)
+        }
+        return []
+    }
+
+    private static func pathHelperShellOutput() -> String {
+        let executable = "/usr/libexec/path_helper"
+        guard FileManager.default.isExecutableFile(atPath: executable) else { return "" }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = ["-s"]
+
+        let stdout = Pipe()
+        let stderr = Pipe()
+        process.standardOutput = stdout
+        process.standardError = stderr
+
+        do {
+            try process.run()
+        } catch {
+            return ""
+        }
+
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else { return "" }
+        let data = stdout.fileHandleForReading.readDataToEndOfFile()
+        return String(data: data, encoding: .utf8) ?? ""
+    }
+
     private static func which(_ executable: String) -> String? {
-        let path = ProcessInfo.processInfo.environment["PATH"] ?? ""
-        for component in path.split(separator: ":") {
-            let candidate = String(component) + "/" + executable
+        for component in executableSearchPaths() {
+            let candidate = (component as NSString).appendingPathComponent(executable)
             if FileManager.default.isExecutableFile(atPath: candidate) {
                 return candidate
             }
@@ -4382,6 +5554,11 @@ final class WorkspaceRemoteSessionController {
         return " (retry \(retry) in \(seconds)s)"
     }
 
+    private static func retryDelay(baseDelay: TimeInterval, retry: Int) -> TimeInterval {
+        let exponent = Double(max(0, retry - 1))
+        return min(baseDelay * pow(2.0, exponent), 60.0)
+    }
+
     private static func shouldEscalateProxyErrorToBootstrap(_ detail: String) -> Bool {
         let lowered = detail.lowercased()
         return lowered.contains("remote daemon transport failed")
@@ -4389,6 +5566,481 @@ final class WorkspaceRemoteSessionController {
             || lowered.contains("daemon transport exited")
             || lowered.contains("daemon transport is not connected")
             || lowered.contains("daemon transport stopped")
+    }
+
+    func updateRemotePortScanTTYs(_ ttyNames: [UUID: String]) {
+        queue.async { [weak self] in
+            self?.updateRemotePortScanTTYsLocked(ttyNames)
+        }
+    }
+
+    func kickRemotePortScan(panelId: UUID, reason: PortScanKickReason = .command) {
+        queue.async { [weak self] in
+            self?.kickRemotePortScanLocked(panelId: panelId, reason: reason)
+        }
+    }
+
+    private func updateRemotePortScanTTYsLocked(_ ttyNames: [UUID: String]) {
+        let previousTTYNames = remotePortScanTTYNames
+        let nextTTYNames = ttyNames.reduce(into: [UUID: String]()) { result, entry in
+            guard let ttyName = Self.normalizedRemotePortScanTTYName(entry.value) else { return }
+            result[entry.key] = ttyName
+        }
+        guard previousTTYNames != nextTTYNames else { return }
+        if !nextTTYNames.isEmpty {
+            bootstrapRemoteTTYResolved = true
+            bootstrapRemoteTTYRetryWorkItem?.cancel()
+            bootstrapRemoteTTYRetryWorkItem = nil
+            bootstrapRemoteTTYRetryCount = 0
+        }
+        keepPolledRemotePortsUntilTTYScan =
+            !previousTTYNames.isEmpty
+            ? keepPolledRemotePortsUntilTTYScan
+            : shouldUseFallbackRemotePortPollingLocked() && !polledRemotePorts.isEmpty && !nextTTYNames.isEmpty
+        remoteScannedPortsByPanel = remoteScannedPortsByPanel.filter { panelId, _ in
+            guard let oldTTY = previousTTYNames[panelId],
+                  let newTTY = nextTTYNames[panelId] else {
+                return false
+            }
+            return oldTTY == newTTY
+        }
+        remotePortScanTTYNames = nextTTYNames
+        if nextTTYNames.isEmpty {
+            keepPolledRemotePortsUntilTTYScan = false
+        }
+        updateRemotePortPollingStateLocked()
+        publishPortsSnapshotLocked()
+    }
+
+    private func kickRemotePortScanLocked(panelId: UUID, reason: PortScanKickReason) {
+        guard !isStopping else { return }
+        guard daemonReady else { return }
+        guard remotePortScanTTYNames[panelId] != nil else { return }
+        if remotePortScanBurstActive, remotePortScanActiveReason == .command, reason == .refresh {
+            return
+        }
+        remotePortScanPendingReason = remotePortScanPendingReason?.merged(with: reason) ?? reason
+        scheduleRemotePortScanCoalesceLocked()
+    }
+
+    private func scheduleRemotePortScanCoalesceLocked() {
+        guard !remotePortScanBurstActive else { return }
+        guard remotePortScanCoalesceWorkItem == nil else { return }
+
+        let generation = remotePortScanGeneration
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            guard self.remotePortScanGeneration == generation else { return }
+            self.remotePortScanCoalesceWorkItem = nil
+            guard let reason = self.remotePortScanPendingReason else { return }
+            self.remotePortScanPendingReason = nil
+            self.remotePortScanBurstActive = true
+            self.remotePortScanActiveReason = reason
+            self.runRemotePortScanBurstLocked(index: 0, generation: generation, reason: reason)
+        }
+        remotePortScanCoalesceWorkItem = workItem
+        queue.asyncAfter(deadline: .now() + 0.2, execute: workItem)
+    }
+
+    private func runRemotePortScanBurstLocked(
+        index: Int,
+        generation: UInt64,
+        reason: PortScanKickReason,
+        burstStart: DispatchTime? = nil
+    ) {
+        guard remotePortScanGeneration == generation else { return }
+
+        let burstOffsets = reason.burstOffsets
+        guard index < burstOffsets.count else {
+            remotePortScanBurstActive = false
+            remotePortScanActiveReason = nil
+            if remotePortScanPendingReason != nil && remotePortScanCoalesceWorkItem == nil {
+                scheduleRemotePortScanCoalesceLocked()
+            }
+            return
+        }
+
+        let start = burstStart ?? .now()
+        let deadline = start + burstOffsets[index]
+        queue.asyncAfter(deadline: deadline) { [weak self] in
+            guard let self else { return }
+            guard self.remotePortScanGeneration == generation else { return }
+            self.performRemotePortScanLocked()
+            self.runRemotePortScanBurstLocked(
+                index: index + 1,
+                generation: generation,
+                reason: reason,
+                burstStart: start
+            )
+        }
+    }
+
+    private func performRemotePortScanLocked() {
+        let ttyNamesByPanel = remotePortScanTTYNames
+        guard !ttyNamesByPanel.isEmpty else {
+            remoteScannedPortsByPanel.removeAll()
+            keepPolledRemotePortsUntilTTYScan = false
+            publishPortsSnapshotLocked()
+            return
+        }
+
+        do {
+            remoteScannedPortsByPanel = try scanRemotePortsByPanelLocked(ttyNamesByPanel: ttyNamesByPanel)
+            keepPolledRemotePortsUntilTTYScan = false
+            polledRemotePorts = []
+            publishPortsSnapshotLocked()
+        } catch {
+            debugLog("remote.ports.scan.failed error=\(error.localizedDescription) \(debugConfigSummary())")
+        }
+    }
+
+    private func scanRemotePortsByPanelLocked(ttyNamesByPanel: [UUID: String]) throws -> [UUID: [Int]] {
+        let ttyNames = Array(Set(ttyNamesByPanel.values)).sorted()
+        guard !ttyNames.isEmpty else { return [:] }
+
+        let command = "sh -c \(Self.shellSingleQuoted(Self.remotePortScanScript(ttyNames: ttyNames, excluding: excludedRemoteScanPorts())))"
+        let result = try sshExec(
+            arguments: sshCommonArguments(batchMode: true) + [configuration.destination, command],
+            timeout: 8
+        )
+        guard result.status == 0 else {
+            let detail = Self.bestErrorLine(stderr: result.stderr, stdout: result.stdout) ?? "ssh exited \(result.status)"
+            throw NSError(domain: "cmux.remote.ports", code: 90, userInfo: [
+                NSLocalizedDescriptionKey: "remote port scan failed: \(detail)",
+            ])
+        }
+
+        let portsByTTY = Self.parseRemoteTTYPortPairs(
+            output: result.stdout,
+            trackedTTYNames: Set(ttyNames)
+        )
+
+        return ttyNamesByPanel.reduce(into: [UUID: [Int]]()) { result, entry in
+            result[entry.key] = portsByTTY[entry.value] ?? []
+        }
+    }
+
+    private func startRemotePortPollingLocked(mode: RemotePortPollingMode) {
+        if remotePortPollTimer != nil, remotePortPollMode == mode {
+            return
+        }
+        stopRemotePortPollingLocked()
+
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now() + mode.initialDelay, repeating: mode.repeatInterval)
+        timer.setEventHandler { [weak self] in
+            self?.pollRemotePortsLocked()
+        }
+        remotePortPollTimer = timer
+        remotePortPollMode = mode
+        timer.resume()
+        pollRemotePortsLocked()
+    }
+
+    private func stopRemotePortPollingLocked() {
+        remotePortPollTimer?.setEventHandler {}
+        remotePortPollTimer?.cancel()
+        remotePortPollTimer = nil
+        remotePortPollMode = nil
+    }
+
+    private func updateRemotePortPollingStateLocked() {
+        guard daemonReady, !isStopping, let pollingMode = remotePortPollingModeLocked() else {
+            stopRemotePortPollingLocked()
+            if !keepPolledRemotePortsUntilTTYScan {
+                polledRemotePorts = []
+            }
+            remotePortPollBaselinePorts = nil
+            return
+        }
+        startRemotePortPollingLocked(mode: pollingMode)
+    }
+
+    private func pollRemotePortsLocked() {
+        guard !isStopping else { return }
+        guard daemonReady else { return }
+        if !remotePortScanTTYNames.isEmpty {
+            guard shouldUseTTYFallbackRemotePortPollingLocked() else {
+                stopRemotePortPollingLocked()
+                if !keepPolledRemotePortsUntilTTYScan {
+                    polledRemotePorts = []
+                }
+                publishPortsSnapshotLocked()
+                return
+            }
+            if remotePortScanBurstActive || remotePortScanCoalesceWorkItem != nil || remotePortScanPendingReason != nil {
+                return
+            }
+            performRemotePortScanLocked()
+            return
+        }
+        guard let pollingMode = remotePortPollingModeLocked() else {
+            stopRemotePortPollingLocked()
+            polledRemotePorts = []
+            remotePortPollBaselinePorts = nil
+            keepPolledRemotePortsUntilTTYScan = false
+            publishPortsSnapshotLocked()
+            return
+        }
+        guard remotePortScanTTYNames.isEmpty else {
+            stopRemotePortPollingLocked()
+            if !keepPolledRemotePortsUntilTTYScan {
+                polledRemotePorts = []
+            }
+            remotePortPollBaselinePorts = nil
+            publishPortsSnapshotLocked()
+            return
+        }
+
+        let command = "sh -c \(Self.shellSingleQuoted(Self.remoteAllPortsScanScript(excluding: excludedRemoteScanPorts())))"
+        do {
+            let result = try sshExec(
+                arguments: sshCommonArguments(batchMode: true) + [configuration.destination, command],
+                timeout: 8
+            )
+            guard result.status == 0 else {
+                let detail = Self.bestErrorLine(stderr: result.stderr, stdout: result.stdout) ?? "ssh exited \(result.status)"
+                throw NSError(domain: "cmux.remote.ports", code: 90, userInfo: [
+                    NSLocalizedDescriptionKey: "remote port scan failed: \(detail)",
+                ])
+            }
+            let currentPorts = Set(Self.parseRemotePorts(output: result.stdout))
+            switch pollingMode {
+            case .hostWide:
+                polledRemotePorts = currentPorts.sorted()
+                remotePortPollBaselinePorts = nil
+            case .hostWideDelta:
+                if let baselinePorts = remotePortPollBaselinePorts {
+                    polledRemotePorts = currentPorts.subtracting(baselinePorts).sorted()
+                } else {
+                    remotePortPollBaselinePorts = currentPorts
+                    polledRemotePorts = []
+                }
+            case .ttyScoped:
+                polledRemotePorts = []
+                remotePortPollBaselinePorts = nil
+            }
+            keepPolledRemotePortsUntilTTYScan = false
+            publishPortsSnapshotLocked()
+        } catch {
+            debugLog("remote.ports.poll.failed error=\(error.localizedDescription) \(debugConfigSummary())")
+        }
+    }
+
+    private func excludedRemoteScanPorts() -> Set<Int> {
+        var excluded: Set<Int> = []
+        if let relayPort = configuration.relayPort, relayPort > 0 {
+            excluded.insert(relayPort)
+        }
+        if let configuredPort = configuration.port, configuredPort > 0 {
+            excluded.insert(configuredPort)
+        }
+        return excluded
+    }
+
+    private func shouldUseFallbackRemotePortPollingLocked() -> Bool {
+        // `cmux ssh` owns the remote shell bootstrap and can report the remote
+        // TTY precisely. Falling back to host-wide port scans in that path leaks
+        // unrelated listeners from the remote machine into the workspace card.
+        let startupCommand = configuration.terminalStartupCommand?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return startupCommand?.isEmpty != false
+    }
+
+    private func shouldUseTTYFallbackRemotePortPollingLocked() -> Bool {
+        // `cmux ssh` can still land in shells without our command hooks, such as
+        // `/bin/sh` in the Docker fixture. Once the workspace knows the TTY,
+        // keep a low-frequency TTY-scoped poll so unsupported shells still
+        // surface ports without bringing back noisy host-wide scans.
+        let startupCommand = configuration.terminalStartupCommand?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return startupCommand?.isEmpty == false
+    }
+
+    private func remotePortPollingModeLocked() -> RemotePortPollingMode? {
+        if !remotePortScanTTYNames.isEmpty {
+            return shouldUseTTYFallbackRemotePortPollingLocked() ? .ttyScoped : nil
+        }
+        let startupCommand = configuration.terminalStartupCommand?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if startupCommand?.isEmpty == false {
+            return .hostWideDelta
+        }
+        return shouldUseFallbackRemotePortPollingLocked() ? .hostWide : nil
+    }
+
+    private static func parseRemoteTTYPortPairs(output: String, trackedTTYNames: Set<String>) -> [String: [Int]] {
+        var portsByTTY = Dictionary(uniqueKeysWithValues: trackedTTYNames.map { ($0, Set<Int>()) })
+
+        for line in output.split(separator: "\n") {
+            let parts = line.split(separator: "\t", omittingEmptySubsequences: false)
+            guard parts.count == 2 else { continue }
+            let ttyName = String(parts[0]).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trackedTTYNames.contains(ttyName),
+                  let port = Int(parts[1]),
+                  port >= 1024,
+                  port <= 65535 else {
+                continue
+            }
+            portsByTTY[ttyName, default: []].insert(port)
+        }
+
+        return portsByTTY.reduce(into: [String: [Int]]()) { result, entry in
+            result[entry.key] = entry.value.sorted()
+        }
+    }
+
+    private static func parseRemotePorts(output: String) -> [Int] {
+        let values = output
+            .split(whereSeparator: \.isWhitespace)
+            .compactMap { Int($0) }
+            .filter { $0 >= 1024 && $0 <= 65535 }
+        return Array(Set(values)).sorted()
+    }
+
+    private static func normalizedRemotePortScanTTYName(_ raw: String) -> String? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let candidate = trimmed.split(separator: "/").last.map(String.init) ?? trimmed
+        guard !candidate.isEmpty else { return nil }
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "._-"))
+        guard candidate.unicodeScalars.allSatisfy({ allowed.contains($0) }) else { return nil }
+        return candidate
+    }
+
+    private static func remotePortScanScript(ttyNames: [String], excluding ports: Set<Int>) -> String {
+        let ttySet = ttyNames.joined(separator: " ")
+        let ttyCSV = ttyNames.joined(separator: ",")
+        let excludedPorts = ports.sorted().map(String.init).joined(separator: " ")
+
+        return """
+        set -eu
+        cmux_tracked_ttys=" \(ttySet) "
+        cmux_tty_csv='\(ttyCSV)'
+        cmux_excluded_ports=" \(excludedPorts) "
+
+        cmux_emit_port() {
+          cmux_tty="$1"
+          cmux_port="$2"
+          case "$cmux_tracked_ttys" in
+            *" $cmux_tty "*) ;;
+            *) return 0 ;;
+          esac
+          case "$cmux_excluded_ports" in
+            *" $cmux_port "*) return 0 ;;
+          esac
+          [ "$cmux_port" -ge 1024 ] && [ "$cmux_port" -le 65535 ] || return 0
+          printf '%s\\t%s\\n' "$cmux_tty" "$cmux_port"
+        }
+
+        cmux_used_ss=0
+        if [ -d /proc ] && command -v ss >/dev/null 2>&1; then
+          cmux_ss_output="$(ss -ltnpH 2>/dev/null || true)"
+          case "$cmux_ss_output" in
+            *pid=*)
+              cmux_used_ss=1
+              printf '%s\\n' "$cmux_ss_output" | while IFS= read -r cmux_line; do
+                [ -n "$cmux_line" ] || continue
+                cmux_port="$(printf '%s\\n' "$cmux_line" | awk '{print $4}' | sed -E 's/.*:([0-9]+)$/\\1/' | awk '/^[0-9]+$/ { print $1; exit }')"
+                [ -n "$cmux_port" ] || continue
+                printf '%s\\n' "$cmux_line" | awk '
+                  {
+                    line = $0
+                    while (match(line, /pid=[0-9]+/)) {
+                      print substr(line, RSTART + 4, RLENGTH - 4)
+                      line = substr(line, RSTART + RLENGTH)
+                    }
+                  }
+                ' | while IFS= read -r cmux_pid; do
+                  [ -n "$cmux_pid" ] || continue
+                  cmux_tty_path="$(readlink "/proc/$cmux_pid/fd/0" 2>/dev/null || true)"
+                  [ -n "$cmux_tty_path" ] || continue
+                  cmux_tty="${cmux_tty_path##*/}"
+                  [ -n "$cmux_tty" ] || continue
+                  cmux_emit_port "$cmux_tty" "$cmux_port"
+                done
+              done
+              ;;
+          esac
+        fi
+
+        if [ "$cmux_used_ss" -eq 0 ] && command -v lsof >/dev/null 2>&1 && [ -n "$cmux_tty_csv" ]; then
+          cmux_tmpdir="$(mktemp -d 2>/dev/null || mktemp -d -t cmux-ports)"
+          trap 'rm -rf "$cmux_tmpdir"' EXIT INT TERM
+          cmux_pid_tty_map="$cmux_tmpdir/pid_tty"
+          ps -t "$cmux_tty_csv" -o pid=,tty= 2>/dev/null | awk '
+            NF >= 2 {
+              tty = $2
+              sub(/^.*\\//, "", tty)
+              print $1 "\\t" tty
+            }
+          ' > "$cmux_pid_tty_map"
+          [ -s "$cmux_pid_tty_map" ] || exit 0
+          cmux_pid_csv="$(awk '{print $1}' "$cmux_pid_tty_map" | paste -sd, -)"
+          [ -n "$cmux_pid_csv" ] || exit 0
+          lsof -nP -a -p "$cmux_pid_csv" -iTCP -sTCP:LISTEN -Fpn 2>/dev/null | awk -v map="$cmux_pid_tty_map" '
+            BEGIN {
+              while ((getline < map) > 0) {
+                pid_to_tty[$1] = $2
+              }
+              close(map)
+            }
+            $0 ~ /^p/ {
+              pid = substr($0, 2)
+              tty = pid_to_tty[pid]
+              next
+            }
+            $0 ~ /^n/ && tty != "" {
+              name = substr($0, 2)
+              sub(/->.*/, "", name)
+              sub(/^.*:/, "", name)
+              sub(/[^0-9].*/, "", name)
+              if (name != "") {
+                print tty "\\t" name
+              }
+            }
+          ' | while IFS=$'\\t' read -r cmux_tty cmux_port; do
+            [ -n "$cmux_tty" ] || continue
+            [ -n "$cmux_port" ] || continue
+            cmux_emit_port "$cmux_tty" "$cmux_port"
+          done
+        fi
+        """
+    }
+
+    private static func remoteAllPortsScanScript(excluding ports: Set<Int>) -> String {
+        let excludedPorts = ports.sorted().map(String.init).joined(separator: " ")
+
+        return """
+        set -eu
+        cmux_excluded_ports=" \(excludedPorts) "
+
+        cmux_emit_port() {
+          cmux_port="$1"
+          case "$cmux_excluded_ports" in
+            *" $cmux_port "*) return 0 ;;
+          esac
+          [ "$cmux_port" -ge 1024 ] && [ "$cmux_port" -le 65535 ] || return 0
+          printf '%s\\n' "$cmux_port"
+        }
+
+        if command -v ss >/dev/null 2>&1; then
+          ss -ltnH 2>/dev/null | awk '{print $4}' | sed -E 's/.*:([0-9]+)$/\\1/' | awk '/^[0-9]+$/ {print $1}' | while IFS= read -r cmux_port; do
+            [ -n "$cmux_port" ] || continue
+            cmux_emit_port "$cmux_port"
+          done
+        elif command -v netstat >/dev/null 2>&1; then
+          netstat -lnt 2>/dev/null | awk 'NR > 2 {print $4}' | sed -E 's/.*:([0-9]+)$/\\1/' | awk '/^[0-9]+$/ {print $1}' | while IFS= read -r cmux_port; do
+            [ -n "$cmux_port" ] || continue
+            cmux_emit_port "$cmux_port"
+          done
+        elif command -v lsof >/dev/null 2>&1; then
+          lsof -nP -iTCP -sTCP:LISTEN 2>/dev/null | awk 'NR > 1 {print $9}' | sed -E 's/.*:([0-9]+)$/\\1/' | awk '/^[0-9]+$/ {print $1}' | while IFS= read -r cmux_port; do
+            [ -n "$cmux_port" ] || continue
+            cmux_emit_port "$cmux_port"
+          done
+        fi
+        """
     }
 
 }
@@ -4401,21 +6053,29 @@ enum SidebarLogLevel: String {
     case error
 }
 
-struct SidebarLogEntry {
+struct SidebarLogEntry: Equatable {
     let message: String
     let level: SidebarLogLevel
     let source: String?
     let timestamp: Date
 }
 
-struct SidebarProgressState {
+struct SidebarProgressState: Equatable {
     let value: Double
     let label: String?
 }
 
-struct SidebarGitBranchState {
+struct SidebarGitBranchState: Equatable {
     let branch: String
     let isDirty: Bool
+}
+
+private struct SidebarPanelObservationState: Equatable {
+    let panelIds: [UUID]
+
+    init(panels: [UUID: any Panel]) {
+        panelIds = panels.keys.sorted { $0.uuidString < $1.uuidString }
+    }
 }
 
 enum WorkspaceRemoteConnectionState: String {
@@ -4463,6 +6123,33 @@ struct WorkspaceRemoteConfiguration: Equatable {
     let relayToken: String?
     let localSocketPath: String?
     let terminalStartupCommand: String?
+    let foregroundAuthToken: String?
+
+    init(
+        destination: String,
+        port: Int?,
+        identityFile: String?,
+        sshOptions: [String],
+        localProxyPort: Int?,
+        relayPort: Int?,
+        relayID: String?,
+        relayToken: String?,
+        localSocketPath: String?,
+        terminalStartupCommand: String?,
+        foregroundAuthToken: String? = nil
+    ) {
+        self.destination = destination
+        self.port = port
+        self.identityFile = identityFile
+        self.sshOptions = sshOptions
+        self.localProxyPort = localProxyPort
+        self.relayPort = relayPort
+        self.relayID = relayID
+        self.relayToken = relayToken
+        self.localSocketPath = localSocketPath
+        self.terminalStartupCommand = terminalStartupCommand
+        self.foregroundAuthToken = foregroundAuthToken
+    }
 
     var displayTarget: String {
         guard let port else { return destination }
@@ -4506,11 +6193,35 @@ enum SidebarPullRequestStatus: String {
     case closed
 }
 
+private func normalizedSidebarBranchName(_ branch: String?) -> String? {
+    guard let branch else { return nil }
+    let trimmed = branch.trimmingCharacters(in: .whitespacesAndNewlines)
+    return trimmed.isEmpty ? nil : trimmed
+}
+
 struct SidebarPullRequestState: Equatable {
     let number: Int
     let label: String
     let url: URL
     let status: SidebarPullRequestStatus
+    let branch: String?
+    let isStale: Bool
+
+    init(
+        number: Int,
+        label: String,
+        url: URL,
+        status: SidebarPullRequestStatus,
+        branch: String? = nil,
+        isStale: Bool = false
+    ) {
+        self.number = number
+        self.label = label
+        self.url = url
+        self.status = status
+        self.branch = normalizedSidebarBranchName(branch)
+        self.isStale = isStale
+    }
 }
 
 enum SidebarBranchOrdering {
@@ -4523,6 +6234,154 @@ enum SidebarBranchOrdering {
         let branch: String?
         let isDirty: Bool
         let directory: String?
+    }
+
+    fileprivate static func normalizedDirectory(_ text: String?) -> String? {
+        guard let text else { return nil }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private static func relativePathFromTilde(_ directory: String) -> String? {
+        let normalized = normalizedDirectory(directory)
+        switch normalized {
+        case "~":
+            return ""
+        case let path? where path.hasPrefix("~/"):
+            return String(path.dropFirst(2))
+        default:
+            return nil
+        }
+    }
+
+    private static func commonHomeDirectoryPrefix(from absoluteDirectory: String) -> String? {
+        guard let normalized = normalizedDirectory(absoluteDirectory) else { return nil }
+        let standardized = NSString(string: normalized).standardizingPath
+        if standardized == "/root" || standardized.hasPrefix("/root/") {
+            return "/root"
+        }
+
+        let components = NSString(string: standardized).pathComponents
+        if components.count >= 3, components[0] == "/", components[1] == "Users" {
+            return NSString.path(withComponents: Array(components.prefix(3)))
+        }
+        if components.count >= 3, components[0] == "/", components[1] == "home" {
+            return NSString.path(withComponents: Array(components.prefix(3)))
+        }
+        if components.count >= 4, components[0] == "/", components[1] == "var", components[2] == "home" {
+            return NSString.path(withComponents: Array(components.prefix(4)))
+        }
+
+        return nil
+    }
+
+    private static func inferredHomeDirectory(
+        matchingTildeDirectory tildeDirectory: String,
+        absoluteDirectory: String
+    ) -> String? {
+        guard let relativePath = relativePathFromTilde(tildeDirectory),
+              let normalizedAbsolute = normalizedDirectory(absoluteDirectory) else { return nil }
+        let standardizedAbsolute = NSString(string: normalizedAbsolute).standardizingPath
+        let homeDirectory: String
+        if relativePath.isEmpty {
+            homeDirectory = standardizedAbsolute
+        } else {
+            let suffix = "/" + relativePath
+            guard standardizedAbsolute.hasSuffix(suffix) else { return nil }
+            homeDirectory = String(standardizedAbsolute.dropLast(suffix.count))
+        }
+
+        guard commonHomeDirectoryPrefix(from: homeDirectory) == homeDirectory else { return nil }
+        return homeDirectory
+    }
+
+    fileprivate static func inferredRemoteHomeDirectory(
+        from directories: [String],
+        fallbackDirectory: String?
+    ) -> String? {
+        let candidates = directories + [fallbackDirectory].compactMap { $0 }
+        let tildeDirectories = candidates.compactMap { directory -> String? in
+            guard let normalized = normalizedDirectory(directory),
+                  relativePathFromTilde(normalized) != nil else { return nil }
+            return normalized
+        }
+        let absoluteDirectories = candidates.compactMap { directory -> String? in
+            guard let normalized = normalizedDirectory(directory), normalized.hasPrefix("/") else { return nil }
+            return NSString(string: normalized).standardizingPath
+        }
+
+        let inferredHomes = Set(
+            tildeDirectories.flatMap { tildeDirectory in
+                absoluteDirectories.compactMap { absoluteDirectory in
+                    inferredHomeDirectory(
+                        matchingTildeDirectory: tildeDirectory,
+                        absoluteDirectory: absoluteDirectory
+                    )
+                }
+            }
+        )
+
+        if inferredHomes.count == 1 {
+            return inferredHomes.first
+        }
+        if !inferredHomes.isEmpty {
+            return nil
+        }
+
+        return absoluteDirectories.lazy.compactMap(commonHomeDirectoryPrefix(from:)).first
+    }
+
+    private static func expandedTildePath(
+        _ directory: String,
+        homeDirectoryForTildeExpansion: String?
+    ) -> String {
+        guard let relativePath = relativePathFromTilde(directory),
+              let homeDirectory = normalizedDirectory(homeDirectoryForTildeExpansion) else {
+            return directory
+        }
+        if relativePath.isEmpty {
+            return homeDirectory
+        }
+        return NSString(string: homeDirectory).appendingPathComponent(relativePath)
+    }
+
+    fileprivate static func canonicalDirectoryKey(
+        _ directory: String?,
+        homeDirectoryForTildeExpansion: String?
+    ) -> String? {
+        guard let directory = normalizedDirectory(directory) else { return nil }
+        let expanded = expandedTildePath(
+            directory,
+            homeDirectoryForTildeExpansion: homeDirectoryForTildeExpansion
+        )
+        let standardized = NSString(string: expanded).standardizingPath
+        let cleaned = standardized.trimmingCharacters(in: .whitespacesAndNewlines)
+        return cleaned.isEmpty ? nil : cleaned
+    }
+
+    private static func preferredDisplayedDirectory(
+        existing: String?,
+        replacement: String?,
+        homeDirectoryForTildeExpansion: String?
+    ) -> String? {
+        guard let replacement = normalizedDirectory(replacement) else { return existing }
+        guard let existing = normalizedDirectory(existing) else { return replacement }
+
+        let existingUsesTilde = relativePathFromTilde(existing) != nil
+        let replacementUsesTilde = relativePathFromTilde(replacement) != nil
+        if existingUsesTilde != replacementUsesTilde {
+            return replacementUsesTilde ? existing : replacement
+        }
+
+        if canonicalDirectoryKey(existing, homeDirectoryForTildeExpansion: homeDirectoryForTildeExpansion)
+            == canonicalDirectoryKey(
+                replacement,
+                homeDirectoryForTildeExpansion: homeDirectoryForTildeExpansion
+            ) {
+            return existing
+        }
+
+        return replacement
     }
 
     static func orderedPaneIds(tree: ExternalTreeNode) -> [String] {
@@ -4606,6 +6465,10 @@ enum SidebarBranchOrdering {
             }
         }
 
+        func freshnessPriority(_ isStale: Bool) -> Int {
+            isStale ? 0 : 1
+        }
+
         func normalizedReviewURLKey(for url: URL) -> String {
             guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
                 return url.absoluteString
@@ -4640,7 +6503,10 @@ enum SidebarBranchOrdering {
                 continue
             }
             guard let existing = pullRequestsByKey[key] else { continue }
-            if statusPriority(state.status) > statusPriority(existing.status) {
+            if freshnessPriority(state.isStale) > freshnessPriority(existing.isStale) {
+                pullRequestsByKey[key] = state
+            } else if freshnessPriority(state.isStale) == freshnessPriority(existing.isStale),
+                      statusPriority(state.status) > statusPriority(existing.status) {
                 pullRequestsByKey[key] = state
             }
         }
@@ -4657,6 +6523,7 @@ enum SidebarBranchOrdering {
         panelBranches: [UUID: SidebarGitBranchState],
         panelDirectories: [UUID: String],
         defaultDirectory: String?,
+        homeDirectoryForTildeExpansion: String?,
         fallbackBranch: SidebarGitBranchState?
     ) -> [BranchDirectoryEntry] {
         struct EntryKey: Hashable {
@@ -4670,20 +6537,7 @@ enum SidebarBranchOrdering {
             var directory: String?
         }
 
-        func normalized(_ text: String?) -> String? {
-            guard let text else { return nil }
-            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-            return trimmed.isEmpty ? nil : trimmed
-        }
-
-        func canonicalDirectoryKey(_ directory: String?) -> String? {
-            guard let directory = normalized(directory) else { return nil }
-            let expanded = NSString(string: directory).expandingTildeInPath
-            let standardized = NSString(string: expanded).standardizingPath
-            let cleaned = standardized.trimmingCharacters(in: .whitespacesAndNewlines)
-            return cleaned.isEmpty ? nil : cleaned
-        }
-
+        let normalized = normalizedDirectory
         let normalizedFallbackBranch = normalized(fallbackBranch?.branch)
         let shouldUseFallbackBranchPerPanel = !orderedPanelIds.contains {
             normalized(panelBranches[$0]?.branch) != nil
@@ -4697,7 +6551,7 @@ enum SidebarBranchOrdering {
         for panelId in orderedPanelIds {
             let panelBranch = normalized(panelBranches[panelId]?.branch)
             let branch = panelBranch ?? defaultBranchForPanels
-            let directory = normalized(panelDirectories[panelId] ?? defaultDirectory)
+            let directory = normalized(panelDirectories[panelId])
             guard branch != nil || directory != nil else { continue }
 
             let panelDirty = panelBranch != nil
@@ -4705,7 +6559,10 @@ enum SidebarBranchOrdering {
                 : defaultBranchDirty
 
             let key: EntryKey
-            if let directoryKey = canonicalDirectoryKey(directory) {
+            if let directoryKey = canonicalDirectoryKey(
+                directory,
+                homeDirectoryForTildeExpansion: homeDirectoryForTildeExpansion
+            ) {
                 // Keep one line per directory and allow the latest branch state to overwrite.
                 key = EntryKey(directory: directoryKey, branch: nil)
             } else {
@@ -4722,9 +6579,11 @@ enum SidebarBranchOrdering {
                     } else if existing.branch == nil {
                         existing.isDirty = panelDirty
                     }
-                    if let directory {
-                        existing.directory = directory
-                    }
+                    existing.directory = preferredDisplayedDirectory(
+                        existing: existing.directory,
+                        replacement: directory,
+                        homeDirectoryForTildeExpansion: homeDirectoryForTildeExpansion
+                    )
                     entries[key] = existing
                 } else if panelDirty {
                     existing.isDirty = true
@@ -4775,12 +6634,19 @@ struct ClosedBrowserPanelRestoreSnapshot {
 /// Each workspace contains one BonsplitController that manages split panes and nested surfaces.
 @MainActor
 final class Workspace: Identifiable, ObservableObject {
+    static let terminalScrollBarHiddenDidChangeNotification = Notification.Name(
+        "cmux.workspaceTerminalScrollBarHiddenDidChange"
+    )
+
     let id: UUID
     @Published var title: String
     @Published var customTitle: String?
+    @Published var customDescription: String?
     @Published var isPinned: Bool = false
     @Published var customColor: String?  // hex string, e.g. "#C0392B"
+    @Published private(set) var terminalScrollBarHidden: Bool = false
     @Published var currentDirectory: String
+    @Published private(set) var surfaceTabBarDirectory: String?
     private(set) var preferredBrowserProfileID: UUID?
 
     /// Ordinal for CMUX_PORT range assignment (monotonically increasing per app session)
@@ -4788,6 +6654,15 @@ final class Workspace: Identifiable, ObservableObject {
 
     /// The bonsplit controller managing the split panes for this workspace
     let bonsplitController: BonsplitController
+    private struct SurfaceTabBarExecutableButton {
+        let button: CmuxSurfaceTabBarButton
+        let workspaceCommand: CmuxResolvedCommand?
+        let terminalCommandSourcePath: String?
+    }
+
+    private var surfaceTabBarCommandButtons: [String: SurfaceTabBarExecutableButton] = [:]
+    private var surfaceTabBarButtonSourcePath: String?
+    private var surfaceTabBarButtonGlobalConfigPath: String?
 
     /// Mapping from bonsplit TabID to our Panel instances
     @Published private(set) var panels: [UUID: any Panel] = [:]
@@ -4849,6 +6724,10 @@ final class Workspace: Identifiable, ObservableObject {
     @Published private(set) var panelCustomTitles: [UUID: String] = [:]
     @Published private(set) var pinnedPanelIds: Set<UUID> = []
     @Published private(set) var manualUnreadPanelIds: Set<UUID> = []
+    @Published private(set) var tmuxLayoutSnapshot: LayoutSnapshot?
+    @Published private(set) var tmuxWorkspaceFlashPanelId: UUID?
+    @Published private(set) var tmuxWorkspaceFlashReason: WorkspaceAttentionFlashReason?
+    @Published private(set) var tmuxWorkspaceFlashToken: UInt64 = 0
     private var manualUnreadMarkedAt: [UUID: Date] = [:]
     nonisolated private static let manualUnreadFocusGraceInterval: TimeInterval = 0.2
     nonisolated private static let manualUnreadClearDelayAfterFocusFlash: TimeInterval = 0.2
@@ -4861,6 +6740,7 @@ final class Workspace: Identifiable, ObservableObject {
     @Published var pullRequest: SidebarPullRequestState?
     @Published var panelPullRequests: [UUID: SidebarPullRequestState] = [:]
     @Published var surfaceListeningPorts: [UUID: [Int]] = [:]
+    var agentListeningPorts: [Int] = []
     @Published var remoteConfiguration: WorkspaceRemoteConfiguration?
     @Published var remoteConnectionState: WorkspaceRemoteConnectionState = .disconnected
     @Published var remoteConnectionDetail: String?
@@ -4875,24 +6755,87 @@ final class Workspace: Identifiable, ObservableObject {
     @Published private(set) var activeRemoteTerminalSessionCount: Int = 0
     var surfaceTTYNames: [UUID: String] = [:]
     private var remoteSessionController: WorkspaceRemoteSessionController?
+    private var pendingRemoteForegroundAuthToken: String?
     fileprivate var activeRemoteSessionControllerID: UUID?
     private var remoteLastErrorFingerprint: String?
     private var remoteLastDaemonErrorFingerprint: String?
     private var remoteLastPortConflictFingerprint: String?
+    private var remoteDetectedSurfaceIds: Set<UUID> = []
     private var activeRemoteTerminalSurfaceIds: Set<UUID> = []
+    private var pendingRemoteTerminalChildExitSurfaceIds: Set<UUID> = []
 
     private static let remoteErrorStatusKey = "remote.error"
     private static let remotePortConflictStatusKey = "remote.port_conflicts"
+    private static let remoteNotificationCooldown: TimeInterval = 5 * 60
+    private static let sshControlMasterCleanupQueue = DispatchQueue(
+        label: "com.cmux.remote-ssh.control-master-cleanup",
+        qos: .utility
+    )
     private static let remoteHeartbeatDateFormatter: ISO8601DateFormatter = {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return formatter
     }()
+    nonisolated(unsafe) static var runSSHControlMasterCommandOverrideForTesting: (([String]) -> Void)?
     private var panelShellActivityStates: [UUID: PanelShellActivityState] = [:]
     /// PIDs associated with agent status entries (e.g. claude_code), keyed by status key.
     /// Used for stale-session detection: if the PID is dead, the status entry is cleared.
     var agentPIDs: [String: pid_t] = [:]
     private var restoredTerminalScrollbackByPanelId: [UUID: String] = [:]
+    private var restoredAgentSnapshotsByPanelId: [UUID: SessionRestorableAgentSnapshot] = [:]
+    private var restoredAgentAutoResumePendingPanelIds: Set<UUID> = []
+    private var invalidatedRestoredAgentFingerprintsByPanelId: [UUID: Int] = [:]
+    private var pendingTerminalInputObserversByPanelId: [UUID: [WorkspacePendingTerminalInputObserver]] = [:]
+
+    private func sidebarObservationSignal<Value: Equatable>(
+        _ publisher: Published<Value>.Publisher
+    ) -> AnyPublisher<Void, Never> {
+        publisher
+            .dropFirst()
+            .removeDuplicates()
+            .map { _ in () }
+            .eraseToAnyPublisher()
+    }
+
+    lazy var sidebarImmediateObservationPublisher: AnyPublisher<Void, Never> = {
+        let publishers: [AnyPublisher<Void, Never>] = [
+            sidebarObservationSignal($title),
+            sidebarObservationSignal($customDescription),
+            sidebarObservationSignal($isPinned),
+            sidebarObservationSignal($customColor),
+            sidebarObservationSignal($terminalScrollBarHidden),
+        ]
+
+        return Publishers.MergeMany(publishers).eraseToAnyPublisher()
+    }()
+
+    lazy var sidebarObservationPublisher: AnyPublisher<Void, Never> = {
+        let publishers: [AnyPublisher<Void, Never>] = [
+            sidebarObservationSignal($currentDirectory),
+            $panels
+                .map(SidebarPanelObservationState.init)
+                .dropFirst()
+                .removeDuplicates()
+                .map { _ in () }
+                .eraseToAnyPublisher(),
+            sidebarObservationSignal($panelDirectories),
+            sidebarObservationSignal($statusEntries),
+            sidebarObservationSignal($metadataBlocks),
+            sidebarObservationSignal($logEntries),
+            sidebarObservationSignal($progress),
+            sidebarObservationSignal($gitBranch),
+            sidebarObservationSignal($panelGitBranches),
+            sidebarObservationSignal($pullRequest),
+            sidebarObservationSignal($panelPullRequests),
+            sidebarObservationSignal($remoteConfiguration),
+            sidebarObservationSignal($remoteConnectionState),
+            sidebarObservationSignal($remoteConnectionDetail),
+            sidebarObservationSignal($activeRemoteTerminalSessionCount),
+            sidebarObservationSignal($listeningPorts),
+        ]
+
+        return Publishers.MergeMany(publishers).eraseToAnyPublisher()
+    }()
 
     private static func isProxyOnlyRemoteError(_ detail: String) -> Bool {
         let lowered = detail.lowercased()
@@ -4911,6 +6854,20 @@ final class Workspace: Identifiable, ObservableObject {
     private var hasProxyOnlyRemoteSidebarError: Bool {
         guard let entry = statusEntries[Self.remoteErrorStatusKey]?.value else { return false }
         return entry.lowercased().contains("remote proxy unavailable")
+    }
+
+    private func remoteNotificationCooldownKey(target: String) -> String? {
+        let rawTarget = (remoteConfiguration?.destination ?? target)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !rawTarget.isEmpty else { return nil }
+        let normalizedHost = rawTarget
+            .split(separator: "@", maxSplits: 1, omittingEmptySubsequences: false)
+            .last
+            .map(String.init)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        guard let normalizedHost, !normalizedHost.isEmpty else { return nil }
+        return "remote-host:\(normalizedHost)"
     }
 
     var focusedSurfaceId: UUID? { focusedPanelId }
@@ -4961,7 +6918,8 @@ final class Workspace: Identifiable, ObservableObject {
     private static func bonsplitAppearance(from config: GhosttyConfig) -> BonsplitConfiguration.Appearance {
         bonsplitAppearance(
             from: config.backgroundColor,
-            backgroundOpacity: config.backgroundOpacity
+            backgroundOpacity: config.backgroundOpacity,
+            tabTitleFontSize: config.surfaceTabBarFontSize
         )
     }
 
@@ -4982,9 +6940,11 @@ final class Workspace: Identifiable, ObservableObject {
 
     private static func bonsplitAppearance(
         from backgroundColor: NSColor,
-        backgroundOpacity: Double
+        backgroundOpacity: Double,
+        tabTitleFontSize: CGFloat = 11
     ) -> BonsplitConfiguration.Appearance {
         BonsplitConfiguration.Appearance(
+            tabTitleFontSize: tabTitleFontSize,
             splitButtonTooltips: Self.currentSplitButtonTooltips(),
             enableAnimations: false,
             chromeColors: .init(
@@ -4997,11 +6957,43 @@ final class Workspace: Identifiable, ObservableObject {
     }
 
     func applyGhosttyChrome(from config: GhosttyConfig, reason: String = "unspecified") {
-        applyGhosttyChrome(
+        let nextHex = Self.bonsplitChromeHex(
             backgroundColor: config.backgroundColor,
-            backgroundOpacity: config.backgroundOpacity,
-            reason: reason
+            backgroundOpacity: config.backgroundOpacity
         )
+        let nextTabTitleFontSize = config.surfaceTabBarFontSize
+        let currentAppearance = bonsplitController.configuration.appearance
+        let currentBackgroundHex = currentAppearance.chromeColors.backgroundHex
+        let currentTabTitleFontSize = currentAppearance.tabTitleFontSize
+        let backgroundChanged = currentBackgroundHex != nextHex
+        let fontSizeChanged = abs(currentTabTitleFontSize - nextTabTitleFontSize) > 0.0001
+        let isNoOp = !backgroundChanged && !fontSizeChanged
+
+        if GhosttyApp.shared.backgroundLogEnabled {
+            GhosttyApp.shared.logBackground(
+                "theme apply workspace=\(id.uuidString) reason=\(reason) " +
+                "currentBg=\(currentBackgroundHex ?? "nil") nextBg=\(nextHex) " +
+                "currentTabFont=\(String(format: "%.3f", currentTabTitleFontSize)) " +
+                "nextTabFont=\(String(format: "%.3f", nextTabTitleFontSize)) noop=\(isNoOp)"
+            )
+        }
+
+        guard !isNoOp else { return }
+
+        if backgroundChanged {
+            bonsplitController.configuration.appearance.chromeColors.backgroundHex = nextHex
+        }
+        if fontSizeChanged {
+            bonsplitController.configuration.appearance.tabTitleFontSize = nextTabTitleFontSize
+        }
+
+        if GhosttyApp.shared.backgroundLogEnabled {
+            GhosttyApp.shared.logBackground(
+                "theme applied workspace=\(id.uuidString) reason=\(reason) " +
+                "resultingBg=\(bonsplitController.configuration.appearance.chromeColors.backgroundHex ?? "nil") " +
+                "resultingTabFont=\(String(format: "%.3f", bonsplitController.configuration.appearance.tabTitleFontSize))"
+            )
+        }
     }
 
     func applyGhosttyChrome(backgroundColor: NSColor, backgroundOpacity: Double, reason: String = "unspecified") {
@@ -5034,8 +7026,9 @@ final class Workspace: Identifiable, ObservableObject {
         title: String = "Terminal",
         workingDirectory: String? = nil,
         portOrdinal: Int = 0,
-        configTemplate: ghostty_surface_config_s? = nil,
+        configTemplate: CmuxSurfaceConfigTemplate? = nil,
         initialTerminalCommand: String? = nil,
+        initialTerminalInput: String? = nil,
         initialTerminalEnvironment: [String: String] = [:]
     ) {
         self.id = UUID()
@@ -5043,20 +7036,27 @@ final class Workspace: Identifiable, ObservableObject {
         self.processTitle = title
         self.title = title
         self.customTitle = nil
+        self.customDescription = nil
 
         let trimmedWorkingDirectory = workingDirectory?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let hasWorkingDirectory = !trimmedWorkingDirectory.isEmpty
+        let initialDirectory = hasWorkingDirectory
+            ? trimmedWorkingDirectory
+            : FileManager.default.homeDirectoryForCurrentUser.path
         self.currentDirectory = hasWorkingDirectory
             ? trimmedWorkingDirectory
             : FileManager.default.homeDirectoryForCurrentUser.path
+        self.surfaceTabBarDirectory = initialDirectory
 
         // Configure bonsplit with keepAllAlive to preserve terminal state
         // and keep split entry instantaneous.
-        // Avoid re-reading/parsing Ghostty config on every new workspace; this hot path
-        // runs for socket/CLI workspace creation and can cause visible typing lag.
+        // Use the cached Ghostty config so new workspaces inherit tab-strip sizing
+        // without paying repeated parse costs on the workspace-creation hot path.
+        let initialSurfaceTabBarFontSize = GhosttyConfig.load().surfaceTabBarFontSize
         let appearance = Self.bonsplitAppearance(
             from: GhosttyApp.shared.defaultBackgroundColor,
-            backgroundOpacity: GhosttyApp.shared.defaultBackgroundOpacity
+            backgroundOpacity: GhosttyApp.shared.defaultBackgroundOpacity,
+            tabTitleFontSize: initialSurfaceTabBarFontSize
         )
         let config = BonsplitConfiguration(
             allowSplits: true,
@@ -5083,8 +7083,10 @@ final class Workspace: Identifiable, ObservableObject {
             workingDirectory: hasWorkingDirectory ? trimmedWorkingDirectory : nil,
             portOrdinal: portOrdinal,
             initialCommand: initialTerminalCommand,
+            initialInput: initialTerminalInput,
             initialEnvironmentOverrides: initialTerminalEnvironment
         )
+        configureTerminalPanel(terminalPanel)
         panels[terminalPanel.id] = terminalPanel
         panelTitles[terminalPanel.id] = terminalPanel.displayTitle
         seedTerminalInheritanceFontPoints(panelId: terminalPanel.id, configTemplate: configTemplate)
@@ -5135,9 +7137,17 @@ final class Workspace: Identifiable, ObservableObject {
             }
             bonsplitController.selectTab(initialTabId)
         }
+        tmuxLayoutSnapshot = bonsplitController.layoutSnapshot()
     }
 
     deinit {
+        for registrations in pendingTerminalInputObserversByPanelId.values {
+            for registration in registrations {
+                if let observer = registration.observer {
+                    NotificationCenter.default.removeObserver(observer)
+                }
+            }
+        }
         activeRemoteSessionControllerID = nil
         remoteSessionController?.stop()
     }
@@ -5147,6 +7157,65 @@ final class Workspace: Identifiable, ObservableObject {
         var configuration = bonsplitController.configuration
         guard configuration.appearance.splitButtonTooltips != tooltips else { return }
         configuration.appearance.splitButtonTooltips = tooltips
+        bonsplitController.configuration = configuration
+    }
+
+    func applySurfaceTabBarButtons(
+        _ buttons: [CmuxSurfaceTabBarButton],
+        sourcePath: String?,
+        globalConfigPath: String,
+        terminalCommandSourcePaths: [String: String],
+        workspaceCommands: [String: CmuxResolvedCommand]
+    ) {
+        let executableButtons = Dictionary(
+            uniqueKeysWithValues: buttons.compactMap { button in
+                if button.terminalCommand != nil {
+                    return (
+                        button.id,
+                        SurfaceTabBarExecutableButton(
+                            button: button,
+                            workspaceCommand: nil,
+                            terminalCommandSourcePath: button.actionSourcePath ?? terminalCommandSourcePaths[button.id]
+                        )
+                    )
+                }
+                if let workspaceCommand = workspaceCommands[button.id] {
+                    return (
+                        button.id,
+                        SurfaceTabBarExecutableButton(
+                            button: button,
+                            workspaceCommand: workspaceCommand,
+                            terminalCommandSourcePath: nil
+                        )
+                    )
+                }
+                return nil
+            }
+        )
+        surfaceTabBarCommandButtons = executableButtons
+        surfaceTabBarButtonSourcePath = sourcePath
+        surfaceTabBarButtonGlobalConfigPath = globalConfigPath
+
+        let bonsplitButtons = buttons.map { button in
+            let executable = executableButtons[button.id]
+            let allowProjectLocalIcon = executable.map {
+                CmuxConfigExecutor.isTrustedSurfaceButton(
+                    $0.button,
+                    workspaceCommand: $0.workspaceCommand,
+                    terminalCommandSourcePath: $0.terminalCommandSourcePath,
+                    surfaceTabBarConfigSourcePath: sourcePath,
+                    globalConfigPath: globalConfigPath
+                )
+            } ?? true
+            return button.bonsplitActionButton(
+                configSourcePath: sourcePath,
+                globalConfigPath: globalConfigPath,
+                allowProjectLocalIcon: allowProjectLocalIcon
+            )
+        }
+        var configuration = bonsplitController.configuration
+        guard configuration.appearance.splitButtons != bonsplitButtons else { return }
+        configuration.appearance.splitButtons = bonsplitButtons
         bonsplitController.configuration = configuration
     }
 
@@ -5164,8 +7233,10 @@ final class Workspace: Identifiable, ObservableObject {
     /// Prevents repeated close gestures (e.g., middle-click spam) from stacking dialogs.
     private var pendingCloseConfirmTabIds: Set<TabID> = []
 
-    /// Tab IDs whose next close attempt came from an explicit user close gesture
-    /// (Cmd+W or the tab-strip X button), rather than an internal close/move flow.
+    /// Tab IDs whose next close attempt should be treated as an explicit
+    /// workspace-close gesture from the user (the tab-strip X button, or Cmd+W when
+    /// the shortcut preference is set to close the workspace on the last surface),
+    /// rather than an internal close/move flow.
     private var explicitUserCloseTabIds: Set<TabID> = []
 
     /// Deterministic tab selection to apply after a tab closes.
@@ -5199,6 +7270,9 @@ final class Workspace: Identifiable, ObservableObject {
     private var layoutFollowUpBrowserPanelId: UUID?
     private var layoutFollowUpBrowserExitFocusPanelId: UUID?
     private var layoutFollowUpNeedsGeometryPass = false
+    private var layoutFollowUpAttemptScheduled = false
+    private var layoutFollowUpAttemptVersion: Int = 0
+    private var layoutFollowUpStalledAttemptCount = 0
     private var isAttemptingLayoutFollowUp = false
     private var isNormalizingPinnedTabOrder = false
     private var pendingNonFocusSplitFocusReassert: PendingNonFocusSplitFocusReassert?
@@ -5220,15 +7294,49 @@ final class Workspace: Identifiable, ObservableObject {
         let isLoading: Bool
         let isPinned: Bool
         let directory: String?
+        let ttyName: String?
         let cachedTitle: String?
         let customTitle: String?
         let manuallyUnread: Bool
+        let isRemoteTerminal: Bool
+        let remoteRelayPort: Int?
+        let remoteCleanupConfiguration: WorkspaceRemoteConfiguration?
+
+        func withRemoteCleanupConfiguration(_ configuration: WorkspaceRemoteConfiguration?) -> Self {
+            Self(
+                panelId: panelId,
+                panel: panel,
+                title: title,
+                icon: icon,
+                iconImageData: iconImageData,
+                kind: kind,
+                isLoading: isLoading,
+                isPinned: isPinned,
+                directory: directory,
+                ttyName: ttyName,
+                cachedTitle: cachedTitle,
+                customTitle: customTitle,
+                manuallyUnread: manuallyUnread,
+                isRemoteTerminal: isRemoteTerminal,
+                remoteRelayPort: remoteRelayPort,
+                remoteCleanupConfiguration: configuration
+            )
+        }
     }
 
     private var detachingTabIds: Set<TabID> = []
     private var pendingDetachedSurfaces: [TabID: DetachedSurfaceTransfer] = [:]
     private var activeDetachCloseTransactions: Int = 0
     private var isDetachingCloseTransaction: Bool { activeDetachCloseTransactions > 0 }
+    private var pendingRemoteSurfaceTTYName: String?
+    private var pendingRemoteSurfaceTTYSurfaceId: UUID?
+    private var pendingRemoteSurfacePortKickReason: WorkspaceRemoteSessionController.PortScanKickReason?
+    private var pendingRemoteSurfacePortKickSurfaceId: UUID?
+    // When the last live remote terminal is detached out, the source workspace may be
+    // closed immediately after the move succeeds. That teardown must not shut down the
+    // shared SSH control master that is still serving the moved terminal.
+    private var skipControlMasterCleanupAfterDetachedRemoteTransfer = false
+    private var transferredRemoteCleanupConfigurationsByPanelId: [UUID: WorkspaceRemoteConfiguration] = [:]
 
 #if DEBUG
     private func debugElapsedMs(since start: TimeInterval) -> String {
@@ -5247,6 +7355,19 @@ final class Workspace: Identifiable, ObservableObject {
 
     func surfaceIdFromPanelId(_ panelId: UUID) -> TabID? {
         surfaceIdToPanelId.first { $0.value == panelId }?.key
+    }
+
+    private func configureTerminalPanel(_ terminalPanel: TerminalPanel) {
+        terminalPanel.onRequestWorkspacePaneFlash = { [weak self, weak terminalPanel] reason in
+            guard let self, let terminalPanel else { return }
+            self.triggerWorkspacePaneFlash(panelId: terminalPanel.id, reason: reason)
+        }
+    }
+
+    private func triggerWorkspacePaneFlash(panelId: UUID, reason: WorkspaceAttentionFlashReason) {
+        tmuxWorkspaceFlashPanelId = panelId
+        tmuxWorkspaceFlashReason = reason
+        tmuxWorkspaceFlashToken &+= 1
     }
 
 
@@ -5303,7 +7424,8 @@ final class Workspace: Identifiable, ObservableObject {
             return preferredProfileID
         }
         if let sourcePanelId,
-           let sourceBrowserPanel = browserPanel(for: sourcePanelId) {
+           let sourceBrowserPanel = browserPanel(for: sourcePanelId),
+           BrowserProfileStore.shared.profileDefinition(id: sourceBrowserPanel.profileID) != nil {
             return sourceBrowserPanel.profileID
         }
         if let preferredBrowserProfileID,
@@ -5409,7 +7531,31 @@ final class Workspace: Identifiable, ObservableObject {
     }
 
     private func hasUnreadNotification(panelId: UUID) -> Bool {
-        AppDelegate.shared?.notificationStore?.hasUnreadNotification(forTabId: id, surfaceId: panelId) ?? false
+        AppDelegate.shared?.notificationStore?.hasVisibleNotificationIndicator(forTabId: id, surfaceId: panelId) ?? false
+    }
+
+    private func attentionPersistentState() -> WorkspaceAttentionPersistentState {
+        let notificationStore = AppDelegate.shared?.notificationStore
+        let unreadPanelIDs = Set(
+            panels.keys.filter {
+                notificationStore?.hasUnreadNotification(forTabId: id, surfaceId: $0) ?? false
+            }
+        )
+        return WorkspaceAttentionPersistentState(
+            unreadPanelIDs: unreadPanelIDs,
+            focusedReadPanelID: notificationStore?.focusedReadIndicatorSurfaceId(forTabId: id),
+            manualUnreadPanelIDs: manualUnreadPanelIds
+        )
+    }
+
+    private func requestAttentionFlash(panelId: UUID, reason: WorkspaceAttentionFlashReason) {
+        let decision = WorkspaceAttentionCoordinator.decideFlash(
+            targetPanelID: panelId,
+            reason: reason,
+            persistentState: attentionPersistentState()
+        )
+        guard decision.isAllowed else { return }
+        panels[panelId]?.triggerFlash(reason: reason)
     }
 
     private func syncUnreadBadgeStateForPanel(_ panelId: UUID) {
@@ -5604,6 +7750,10 @@ final class Workspace: Identifiable, ObservableObject {
         return !trimmed.isEmpty
     }
 
+    var hasCustomDescription: Bool {
+        Self.normalizedCustomDescription(customDescription) != nil
+    }
+
     func applyProcessTitle(_ title: String) {
         processTitle = title
         guard customTitle == nil else { return }
@@ -5618,6 +7768,24 @@ final class Workspace: Identifiable, ObservableObject {
         }
     }
 
+    func setTerminalScrollBarHidden(_ hidden: Bool) {
+        guard terminalScrollBarHidden != hidden else { return }
+        terminalScrollBarHidden = hidden
+        NotificationCenter.default.post(
+            name: Self.terminalScrollBarHiddenDidChangeNotification,
+            object: self
+        )
+    }
+
+    private static func normalizedCustomDescription(_ description: String?) -> String? {
+        let normalizedLineEndings = description?
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+        let trimmed = normalizedLineEndings?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !trimmed.isEmpty else { return nil }
+        return normalizedLineEndings
+    }
+
     func setCustomTitle(_ title: String?) {
         let trimmed = title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if trimmed.isEmpty {
@@ -5629,7 +7797,46 @@ final class Workspace: Identifiable, ObservableObject {
         }
     }
 
+    func setCustomDescription(_ description: String?) {
+        let normalizedDescription = Self.normalizedCustomDescription(description)
+#if DEBUG
+        let inputNewlines = description?.reduce(into: 0) { count, character in
+            if character == "\n" { count += 1 }
+        } ?? 0
+        let normalizedNewlines = normalizedDescription?.reduce(into: 0) { count, character in
+            if character == "\n" { count += 1 }
+        } ?? 0
+        cmuxDebugLog(
+            "workspace.customDescription.update workspace=\(id.uuidString.prefix(8)) " +
+            "inputLen=\((description as NSString?)?.length ?? 0) " +
+            "inputNewlines=\(inputNewlines) " +
+            "normalizedLen=\((normalizedDescription as NSString?)?.length ?? 0) " +
+            "normalizedNewlines=\(normalizedNewlines) " +
+            "input=\"\(debugWorkspaceDescriptionPreview(description))\" " +
+            "normalized=\"\(debugWorkspaceDescriptionPreview(normalizedDescription))\""
+        )
+#endif
+        customDescription = normalizedDescription
+    }
+
     // MARK: - Directory Updates
+
+    private func configTrackingDirectory(for panelId: UUID?) -> String? {
+        if let panelId {
+            for candidate in [
+                panelDirectories[panelId],
+                terminalPanel(for: panelId)?.requestedWorkingDirectory
+            ] {
+                let trimmed = candidate?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                if !trimmed.isEmpty {
+                    return trimmed
+                }
+            }
+        }
+
+        let trimmedCurrentDirectory = currentDirectory.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmedCurrentDirectory.isEmpty ? nil : trimmedCurrentDirectory
+    }
 
     func updatePanelDirectory(panelId: UUID, directory: String) {
         let trimmed = directory.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -5638,8 +7845,13 @@ final class Workspace: Identifiable, ObservableObject {
             panelDirectories[panelId] = trimmed
         }
         // Update current directory if this is the focused panel
-        if panelId == focusedPanelId, currentDirectory != trimmed {
-            currentDirectory = trimmed
+        if panelId == focusedPanelId {
+            if surfaceTabBarDirectory != trimmed {
+                surfaceTabBarDirectory = trimmed
+            }
+            if currentDirectory != trimmed {
+                currentDirectory = trimmed
+            }
         }
     }
 
@@ -5648,8 +7860,21 @@ final class Workspace: Identifiable, ObservableObject {
         let previousState = panelShellActivityStates[panelId] ?? .unknown
         guard previousState != state else { return }
         panelShellActivityStates[panelId] = state
+        if state == .commandRunning, let restoredAgent = restoredAgentSnapshotsByPanelId[panelId] {
+            if restoredAgentAutoResumePendingPanelIds.remove(panelId) == nil {
+                let fingerprint = TabManager.restorableAgentSnapshotFingerprint(restoredAgent)
+                invalidatedRestoredAgentFingerprintsByPanelId[panelId] = fingerprint
+                restoredAgentSnapshotsByPanelId.removeValue(forKey: panelId)
 #if DEBUG
-        dlog(
+                cmuxDebugLog(
+                    "session.restore.agent.invalidate panel=\(panelId.uuidString.prefix(5)) " +
+                    "kind=\(restoredAgent.kind.rawValue) session=\(restoredAgent.sessionId.prefix(8))"
+                )
+#endif
+            }
+        }
+#if DEBUG
+        cmuxDebugLog(
             "surface.shellState workspace=\(id.uuidString.prefix(5)) " +
             "panel=\(panelId.uuidString.prefix(5)) from=\(previousState.rawValue) to=\(state.rawValue)"
         )
@@ -5666,18 +7891,37 @@ final class Workspace: Identifiable, ObservableObject {
     func updatePanelGitBranch(panelId: UUID, branch: String, isDirty: Bool) {
         let state = SidebarGitBranchState(branch: branch, isDirty: isDirty)
         let existing = panelGitBranches[panelId]
+        let branchChanged = existing?.branch != nil && existing?.branch != branch
         if existing?.branch != branch || existing?.isDirty != isDirty {
             panelGitBranches[panelId] = state
         }
-        if panelId == focusedPanelId {
+        if branchChanged {
+            if panelPullRequests[panelId] != nil {
+                panelPullRequests.removeValue(forKey: panelId)
+            }
+            if panelId == focusedPanelId, pullRequest != nil {
+                pullRequest = nil
+            }
+        }
+        if panelId == focusedPanelId, gitBranch != state {
             gitBranch = state
         }
     }
 
     func clearPanelGitBranch(panelId: UUID) {
-        panelGitBranches.removeValue(forKey: panelId)
+        if panelGitBranches[panelId] != nil {
+            panelGitBranches.removeValue(forKey: panelId)
+        }
+        if panelPullRequests[panelId] != nil {
+            panelPullRequests.removeValue(forKey: panelId)
+        }
         if panelId == focusedPanelId {
-            gitBranch = nil
+            if gitBranch != nil {
+                gitBranch = nil
+            }
+            if pullRequest != nil {
+                pullRequest = nil
+            }
         }
     }
 
@@ -5686,21 +7930,50 @@ final class Workspace: Identifiable, ObservableObject {
         number: Int,
         label: String,
         url: URL,
-        status: SidebarPullRequestStatus
+        status: SidebarPullRequestStatus,
+        branch: String? = nil,
+        isStale: Bool = false
     ) {
-        let state = SidebarPullRequestState(number: number, label: label, url: url, status: status)
         let existing = panelPullRequests[panelId]
+        let normalizedBranch = normalizedSidebarBranchName(branch)
+        let currentPanelBranch = normalizedSidebarBranchName(panelGitBranches[panelId]?.branch)
+        let resolvedBranch: String? = {
+            if let normalizedBranch {
+                return normalizedBranch
+            }
+            if let currentPanelBranch {
+                return currentPanelBranch
+            }
+            guard let existing,
+                  existing.number == number,
+                  existing.label == label,
+                  existing.url == url,
+                  existing.status == status else {
+                return nil
+            }
+            return existing.branch
+        }()
+        let state = SidebarPullRequestState(
+            number: number,
+            label: label,
+            url: url,
+            status: status,
+            branch: resolvedBranch,
+            isStale: isStale
+        )
         if existing != state {
             panelPullRequests[panelId] = state
         }
-        if panelId == focusedPanelId {
+        if panelId == focusedPanelId, pullRequest != state {
             pullRequest = state
         }
     }
 
     func clearPanelPullRequest(panelId: UUID) {
-        panelPullRequests.removeValue(forKey: panelId)
-        if panelId == focusedPanelId {
+        if panelPullRequests[panelId] != nil {
+            panelPullRequests.removeValue(forKey: panelId)
+        }
+        if panelId == focusedPanelId, pullRequest != nil {
             pullRequest = nil
         }
     }
@@ -5708,6 +7981,7 @@ final class Workspace: Identifiable, ObservableObject {
     func resetSidebarContext(reason: String = "unspecified") {
         statusEntries.removeAll()
         agentPIDs.removeAll()
+        agentListeningPorts.removeAll()
         logEntries.removeAll()
         progress = nil
         gitBranch = nil
@@ -5725,7 +7999,7 @@ final class Workspace: Identifiable, ObservableObject {
         guard !browserPanels.isEmpty else { return }
 
 #if DEBUG
-        dlog(
+        cmuxDebugLog(
             "workspace.contextReset.browserPanels workspace=\(id.uuidString.prefix(5)) " +
             "reason=\(reason) count=\(browserPanels.count)"
         )
@@ -5796,6 +8070,9 @@ final class Workspace: Identifiable, ObservableObject {
     }
 
     func pruneSurfaceMetadata(validSurfaceIds: Set<UUID>) {
+        for panelId in Array(pendingTerminalInputObserversByPanelId.keys) where !validSurfaceIds.contains(panelId) {
+            removePendingTerminalInputObservers(forPanelId: panelId)
+        }
         panelDirectories = panelDirectories.filter { validSurfaceIds.contains($0.key) }
         panelTitles = panelTitles.filter { validSurfaceIds.contains($0.key) }
         panelCustomTitles = panelCustomTitles.filter { validSurfaceIds.contains($0.key) }
@@ -5805,13 +8082,27 @@ final class Workspace: Identifiable, ObservableObject {
         manualUnreadMarkedAt = manualUnreadMarkedAt.filter { validSurfaceIds.contains($0.key) }
         surfaceListeningPorts = surfaceListeningPorts.filter { validSurfaceIds.contains($0.key) }
         surfaceTTYNames = surfaceTTYNames.filter { validSurfaceIds.contains($0.key) }
+        remoteDetectedSurfaceIds = remoteDetectedSurfaceIds.filter { validSurfaceIds.contains($0) }
         panelShellActivityStates = panelShellActivityStates.filter { validSurfaceIds.contains($0.key) }
         panelPullRequests = panelPullRequests.filter { validSurfaceIds.contains($0.key) }
+        restoredAgentSnapshotsByPanelId = restoredAgentSnapshotsByPanelId.filter {
+            validSurfaceIds.contains($0.key)
+        }
+        restoredAgentAutoResumePendingPanelIds = restoredAgentAutoResumePendingPanelIds.filter {
+            validSurfaceIds.contains($0)
+        }
+        invalidatedRestoredAgentFingerprintsByPanelId = invalidatedRestoredAgentFingerprintsByPanelId.filter {
+            validSurfaceIds.contains($0.key)
+        }
+        syncRemotePortScanTTYs()
         recomputeListeningPorts()
     }
 
     func recomputeListeningPorts() {
-        let unique = Set(surfaceListeningPorts.values.flatMap { $0 }).union(remoteForwardedPorts)
+        let unique = Set(surfaceListeningPorts.values.flatMap { $0 })
+            .union(agentListeningPorts)
+            .union(remoteDetectedPorts)
+            .union(remoteForwardedPorts)
         let next = unique.sorted()
         if listeningPorts != next {
             listeningPorts = next
@@ -5837,6 +8128,77 @@ final class Workspace: Identifiable, ObservableObject {
         )
     }
 
+    private func normalizedSidebarDirectory(_ directory: String?) -> String? {
+        guard let directory else { return nil }
+        let trimmed = directory.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private func sidebarHomeDirectoryForCanonicalization(
+        resolvedPanelDirectories: [UUID: String]
+    ) -> String? {
+        if isRemoteWorkspace {
+            return SidebarBranchOrdering.inferredRemoteHomeDirectory(
+                from: Array(resolvedPanelDirectories.values),
+                fallbackDirectory: normalizedSidebarDirectory(currentDirectory)
+            )
+        }
+        return FileManager.default.homeDirectoryForCurrentUser.path
+    }
+
+    private func sidebarResolvedDirectory(for panelId: UUID) -> String? {
+        if let directory = normalizedSidebarDirectory(panelDirectories[panelId]) {
+            return directory
+        }
+        if let requestedDirectory = normalizedSidebarDirectory(
+            terminalPanel(for: panelId)?.requestedWorkingDirectory
+        ) {
+            return requestedDirectory
+        }
+        guard panelId == focusedPanelId else { return nil }
+        return normalizedSidebarDirectory(currentDirectory)
+    }
+
+    private func sidebarResolvedPanelDirectories(orderedPanelIds: [UUID]) -> [UUID: String] {
+        var resolved: [UUID: String] = [:]
+        for panelId in orderedPanelIds {
+            if let directory = sidebarResolvedDirectory(for: panelId) {
+                resolved[panelId] = directory
+            }
+        }
+        return resolved
+    }
+
+    func sidebarDirectoriesInDisplayOrder(orderedPanelIds: [UUID]) -> [String] {
+        let resolvedDirectories = sidebarResolvedPanelDirectories(orderedPanelIds: orderedPanelIds)
+        let homeDirectoryForCanonicalization = sidebarHomeDirectoryForCanonicalization(
+            resolvedPanelDirectories: resolvedDirectories
+        )
+        var ordered: [String] = []
+        var seen: Set<String> = []
+
+        for panelId in orderedPanelIds {
+            guard let directory = resolvedDirectories[panelId],
+                  let key = SidebarBranchOrdering.canonicalDirectoryKey(
+                      directory,
+                      homeDirectoryForTildeExpansion: homeDirectoryForCanonicalization
+                  ) else { continue }
+            if seen.insert(key).inserted {
+                ordered.append(directory)
+            }
+        }
+
+        if ordered.isEmpty, let fallbackDirectory = normalizedSidebarDirectory(currentDirectory) {
+            return [fallbackDirectory]
+        }
+
+        return ordered
+    }
+
+    func sidebarDirectoriesInDisplayOrder() -> [String] {
+        sidebarDirectoriesInDisplayOrder(orderedPanelIds: sidebarOrderedPanelIds())
+    }
+
     func sidebarGitBranchesInDisplayOrder(orderedPanelIds: [UUID]) -> [SidebarGitBranchState] {
         SidebarBranchOrdering
             .orderedUniqueBranches(
@@ -5854,11 +8216,15 @@ final class Workspace: Identifiable, ObservableObject {
     func sidebarBranchDirectoryEntriesInDisplayOrder(
         orderedPanelIds: [UUID]
     ) -> [SidebarBranchOrdering.BranchDirectoryEntry] {
-        SidebarBranchOrdering.orderedUniqueBranchDirectoryEntries(
+        let resolvedDirectories = sidebarResolvedPanelDirectories(orderedPanelIds: orderedPanelIds)
+        return SidebarBranchOrdering.orderedUniqueBranchDirectoryEntries(
             orderedPanelIds: orderedPanelIds,
             panelBranches: panelGitBranches,
-            panelDirectories: panelDirectories,
-            defaultDirectory: currentDirectory,
+            panelDirectories: resolvedDirectories,
+            defaultDirectory: normalizedSidebarDirectory(currentDirectory),
+            homeDirectoryForTildeExpansion: sidebarHomeDirectoryForCanonicalization(
+                resolvedPanelDirectories: resolvedDirectories
+            ),
             fallbackBranch: gitBranch
         )
     }
@@ -5868,10 +8234,16 @@ final class Workspace: Identifiable, ObservableObject {
     }
 
     func sidebarPullRequestsInDisplayOrder(orderedPanelIds: [UUID]) -> [SidebarPullRequestState] {
-        SidebarBranchOrdering.orderedUniquePullRequests(
+        let validPanelPullRequests = panelPullRequests.filter { panelId, state in
+            guard let pullRequestBranch = normalizedSidebarBranchName(state.branch) else {
+                return true
+            }
+            return normalizedSidebarBranchName(panelGitBranches[panelId]?.branch) == pullRequestBranch
+        }
+        return SidebarBranchOrdering.orderedUniquePullRequests(
             orderedPanelIds: orderedPanelIds,
-            panelPullRequests: panelPullRequests,
-            fallbackPullRequest: pullRequest
+            panelPullRequests: validPanelPullRequests,
+            fallbackPullRequest: nil
         )
     }
 
@@ -5899,12 +8271,58 @@ final class Workspace: Identifiable, ObservableObject {
         remoteConfiguration != nil
     }
 
+    @MainActor
+    func isRemoteTerminalSurface(_ panelId: UUID) -> Bool {
+        activeRemoteTerminalSurfaceIds.contains(panelId)
+    }
+
+    @MainActor
+    func shouldDemoteWorkspaceAfterChildExit(surfaceId: UUID) -> Bool {
+        isRemoteWorkspace || pendingRemoteTerminalChildExitSurfaceIds.contains(surfaceId)
+    }
+
     var remoteDisplayTarget: String? {
         remoteConfiguration?.displayTarget
     }
 
     var hasActiveRemoteTerminalSessions: Bool {
         activeRemoteTerminalSessionCount > 0
+    }
+
+    @MainActor
+    func uploadDroppedFilesForRemoteTerminal(
+        _ fileURLs: [URL],
+        operation: TerminalImageTransferOperation,
+        completion: @escaping (Result<[String], Error>) -> Void
+    ) {
+        guard let controller = remoteSessionController else {
+            completion(.failure(RemoteDropUploadError.unavailable))
+            return
+        }
+        controller.uploadDroppedFiles(fileURLs, operation: operation, completion: completion)
+    }
+
+    @MainActor
+    func uploadDroppedFilesForRemoteTerminal(
+        _ fileURLs: [URL],
+        completion: @escaping (Result<[String], Error>) -> Void
+    ) {
+        uploadDroppedFilesForRemoteTerminal(
+            fileURLs,
+            operation: TerminalImageTransferOperation(),
+            completion: completion
+        )
+    }
+
+    func syncRemotePortScanTTYs() {
+        guard isRemoteWorkspace else { return }
+        remoteSessionController?.updateRemotePortScanTTYs(surfaceTTYNames)
+    }
+
+    func kickRemotePortScan(panelId: UUID, reason: WorkspaceRemoteSessionController.PortScanKickReason = .command) {
+        guard isRemoteWorkspace else { return }
+        syncRemotePortScanTTYs()
+        remoteSessionController?.kickRemotePortScan(panelId: panelId, reason: reason)
     }
 
     func remoteStatusPayload() -> [String: Any] {
@@ -5980,8 +8398,10 @@ final class Workspace: Identifiable, ObservableObject {
     }
 
     func configureRemoteConnection(_ configuration: WorkspaceRemoteConfiguration, autoConnect: Bool = true) {
+        skipControlMasterCleanupAfterDetachedRemoteTransfer = false
         remoteConfiguration = configuration
         seedInitialRemoteTerminalSessionIfNeeded(configuration: configuration)
+        clearRemoteDetectedSurfacePorts()
         remoteDetectedPorts = []
         remoteForwardedPorts = []
         remotePortConflicts = []
@@ -6004,7 +8424,12 @@ final class Workspace: Identifiable, ObservableObject {
         applyRemoteProxyEndpointUpdate(nil)
         applyBrowserRemoteWorkspaceStatusToPanels()
 
-        guard autoConnect else {
+        let foregroundAuthToken = Self.normalizedForegroundAuthToken(configuration.foregroundAuthToken)
+        let shouldAutoConnect =
+            autoConnect
+            || (foregroundAuthToken != nil && foregroundAuthToken == pendingRemoteForegroundAuthToken)
+        pendingRemoteForegroundAuthToken = nil
+        guard shouldAutoConnect else {
             remoteConnectionState = .disconnected
             applyBrowserRemoteWorkspaceStatusToPanels()
             return
@@ -6020,6 +8445,7 @@ final class Workspace: Identifiable, ObservableObject {
         )
         activeRemoteSessionControllerID = controllerID
         remoteSessionController = controller
+        syncRemotePortScanTTYs()
         controller.start()
     }
 
@@ -6028,13 +8454,50 @@ final class Workspace: Identifiable, ObservableObject {
         configureRemoteConnection(configuration, autoConnect: true)
     }
 
+    private static func normalizedForegroundAuthToken(_ token: String?) -> String? {
+        guard let token else { return nil }
+        let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    func notifyRemoteForegroundAuthenticationReady(token: String? = nil) {
+        guard let foregroundAuthToken = Self.normalizedForegroundAuthToken(token) else {
+            return
+        }
+
+        guard let remoteConfiguration else {
+            pendingRemoteForegroundAuthToken = foregroundAuthToken
+            return
+        }
+
+        guard Self.normalizedForegroundAuthToken(remoteConfiguration.foregroundAuthToken) == foregroundAuthToken else {
+            return
+        }
+
+        pendingRemoteForegroundAuthToken = nil
+        guard remoteConnectionState == .disconnected else { return }
+        reconnectRemoteConnection()
+    }
+
     func disconnectRemoteConnection(clearConfiguration: Bool = false) {
+        let shouldCleanupControlMaster =
+            clearConfiguration
+            && !isDetachingCloseTransaction
+            && pendingDetachedSurfaces.isEmpty
+            && !skipControlMasterCleanupAfterDetachedRemoteTransfer
+        let configurationForCleanup = shouldCleanupControlMaster ? remoteConfiguration : nil
         let previousController = remoteSessionController
         activeRemoteSessionControllerID = nil
         remoteSessionController = nil
         previousController?.stop()
+        pendingRemoteForegroundAuthToken = nil
         activeRemoteTerminalSurfaceIds.removeAll()
         activeRemoteTerminalSessionCount = 0
+        pendingRemoteSurfaceTTYName = nil
+        pendingRemoteSurfaceTTYSurfaceId = nil
+        pendingRemoteSurfacePortKickReason = nil
+        pendingRemoteSurfacePortKickSurfaceId = nil
+        clearRemoteDetectedSurfacePorts()
         remoteDetectedPorts = []
         remoteForwardedPorts = []
         remotePortConflicts = []
@@ -6051,14 +8514,18 @@ final class Workspace: Identifiable, ObservableObject {
         remoteLastPortConflictFingerprint = nil
         if clearConfiguration {
             remoteConfiguration = nil
+            skipControlMasterCleanupAfterDetachedRemoteTransfer = false
         }
         applyRemoteProxyEndpointUpdate(nil)
         applyBrowserRemoteWorkspaceStatusToPanels()
         recomputeListeningPorts()
+        if let configurationForCleanup {
+            Self.requestSSHControlMasterCleanupIfNeeded(configuration: configurationForCleanup)
+        }
     }
 
     private func clearRemoteConfigurationIfWorkspaceBecameLocal() {
-        guard panels.isEmpty, remoteConfiguration != nil else { return }
+        guard !isDetachingCloseTransaction, panels.isEmpty, remoteConfiguration != nil else { return }
         disconnectRemoteConnection(clearConfiguration: true)
     }
 
@@ -6075,13 +8542,19 @@ final class Workspace: Identifiable, ObservableObject {
     }
 
     private func trackRemoteTerminalSurface(_ panelId: UUID) {
+        skipControlMasterCleanupAfterDetachedRemoteTransfer = false
+        pendingRemoteTerminalChildExitSurfaceIds.remove(panelId)
+        transferredRemoteCleanupConfigurationsByPanelId.removeValue(forKey: panelId)
         guard activeRemoteTerminalSurfaceIds.insert(panelId).inserted else { return }
         activeRemoteTerminalSessionCount = activeRemoteTerminalSurfaceIds.count
+        applyPendingRemoteSurfaceTTYIfNeeded(to: panelId)
+        _ = applyPendingRemoteSurfacePortKickIfNeeded(to: panelId)
     }
 
     private func untrackRemoteTerminalSurface(_ panelId: UUID) {
         guard activeRemoteTerminalSurfaceIds.remove(panelId) != nil else { return }
         activeRemoteTerminalSessionCount = activeRemoteTerminalSurfaceIds.count
+        guard !isDetachingCloseTransaction else { return }
         maybeDemoteRemoteWorkspaceAfterSSHSessionEnded()
     }
 
@@ -6096,17 +8569,189 @@ final class Workspace: Identifiable, ObservableObject {
         }
     }
 
+    @MainActor
+    func rememberPendingRemoteSurfaceTTY(_ ttyName: String, requestedSurfaceId: UUID?) {
+        let trimmedTTY = ttyName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedTTY.isEmpty else { return }
+        pendingRemoteSurfaceTTYName = trimmedTTY
+        pendingRemoteSurfaceTTYSurfaceId = requestedSurfaceId
+    }
+
+    @MainActor
+    func rememberPendingRemoteSurfacePortKick(
+        reason: WorkspaceRemoteSessionController.PortScanKickReason,
+        requestedSurfaceId: UUID?
+    ) {
+        pendingRemoteSurfacePortKickReason = reason
+        pendingRemoteSurfacePortKickSurfaceId = requestedSurfaceId
+    }
+
+    @MainActor
+    private func applyPendingRemoteSurfaceTTYIfNeeded(to panelId: UUID) {
+        guard let ttyName = pendingRemoteSurfaceTTYName?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !ttyName.isEmpty else {
+            return
+        }
+        if let requestedSurfaceId = pendingRemoteSurfaceTTYSurfaceId, requestedSurfaceId != panelId {
+            return
+        }
+        surfaceTTYNames[panelId] = ttyName
+        pendingRemoteSurfaceTTYName = nil
+        pendingRemoteSurfaceTTYSurfaceId = nil
+        syncRemotePortScanTTYs()
+        if !applyPendingRemoteSurfacePortKickIfNeeded(to: panelId) {
+            kickRemotePortScan(panelId: panelId, reason: .command)
+        }
+    }
+
+    @MainActor
+    @discardableResult
+    func applyPendingRemoteSurfacePortKickIfNeeded(to panelId: UUID) -> Bool {
+        guard let reason = pendingRemoteSurfacePortKickReason else {
+            return false
+        }
+        if let requestedSurfaceId = pendingRemoteSurfacePortKickSurfaceId,
+           requestedSurfaceId != panelId {
+            return false
+        }
+        guard let ttyName = surfaceTTYNames[panelId]?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !ttyName.isEmpty else {
+            return false
+        }
+        _ = ttyName
+        pendingRemoteSurfacePortKickReason = nil
+        pendingRemoteSurfacePortKickSurfaceId = nil
+        kickRemotePortScan(panelId: panelId, reason: reason)
+        return true
+    }
+
+    @MainActor
+    fileprivate func applyBootstrapRemoteTTY(_ ttyName: String) {
+        let trimmedTTY = ttyName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedTTY.isEmpty else { return }
+
+        let candidateSurfaceId: UUID? = {
+            if let focusedPanelId, activeRemoteTerminalSurfaceIds.contains(focusedPanelId) {
+                return focusedPanelId
+            }
+            if activeRemoteTerminalSurfaceIds.count == 1 {
+                return activeRemoteTerminalSurfaceIds.first
+            }
+            return nil
+        }()
+
+        guard let candidateSurfaceId else {
+            rememberPendingRemoteSurfaceTTY(trimmedTTY, requestedSurfaceId: nil)
+            return
+        }
+
+        surfaceTTYNames[candidateSurfaceId] = trimmedTTY
+        syncRemotePortScanTTYs()
+        if !applyPendingRemoteSurfacePortKickIfNeeded(to: candidateSurfaceId) {
+            kickRemotePortScan(panelId: candidateSurfaceId, reason: .command)
+        }
+    }
+
+    private func cleanupTransferredRemoteConnectionIfNeeded(surfaceId: UUID, relayPort: Int?) -> Bool {
+        guard let relayPort,
+              relayPort > 0,
+              let cleanupConfiguration = transferredRemoteCleanupConfigurationsByPanelId[surfaceId],
+              cleanupConfiguration.relayPort == relayPort else {
+            return false
+        }
+        transferredRemoteCleanupConfigurationsByPanelId.removeValue(forKey: surfaceId)
+        Self.requestSSHControlMasterCleanupIfNeeded(configuration: cleanupConfiguration)
+        return true
+    }
+
     func markRemoteTerminalSessionEnded(surfaceId: UUID, relayPort: Int?) {
+        if cleanupTransferredRemoteConnectionIfNeeded(surfaceId: surfaceId, relayPort: relayPort) {
+            return
+        }
         guard let relayPort,
               relayPort > 0,
               remoteConfiguration?.relayPort == relayPort else {
             return
         }
+        pendingRemoteTerminalChildExitSurfaceIds.insert(surfaceId)
         untrackRemoteTerminalSurface(surfaceId)
     }
 
     func teardownRemoteConnection() {
         disconnectRemoteConnection(clearConfiguration: true)
+    }
+
+    private static func requestSSHControlMasterCleanupIfNeeded(configuration: WorkspaceRemoteConfiguration) {
+        guard let arguments = sshControlMasterCleanupArguments(configuration: configuration) else { return }
+        if let override = runSSHControlMasterCommandOverrideForTesting {
+            override(arguments)
+            return
+        }
+
+        sshControlMasterCleanupQueue.async {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+            process.arguments = arguments
+            process.standardInput = FileHandle.nullDevice
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
+            let exitSemaphore = DispatchSemaphore(value: 0)
+            process.terminationHandler = { _ in
+                exitSemaphore.signal()
+            }
+
+            do {
+                try process.run()
+                if exitSemaphore.wait(timeout: .now() + 5) == .timedOut {
+                    if process.isRunning {
+                        process.terminate()
+                    }
+                    _ = exitSemaphore.wait(timeout: .now() + 1)
+                }
+            } catch {
+                return
+            }
+        }
+    }
+
+    private static func sshControlMasterCleanupArguments(configuration: WorkspaceRemoteConfiguration) -> [String]? {
+        let sshOptions = normalizedSSHControlCleanupOptions(configuration.sshOptions)
+        var arguments: [String] = [
+            "-o", "BatchMode=yes",
+            "-o", "ControlMaster=no",
+        ]
+        if let port = configuration.port {
+            arguments += ["-p", String(port)]
+        }
+        if let identityFile = configuration.identityFile?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !identityFile.isEmpty {
+            arguments += ["-i", identityFile]
+        }
+        for option in sshOptions {
+            arguments += ["-o", option]
+        }
+        arguments += ["-O", "exit", configuration.destination]
+        return arguments
+    }
+
+    private static func normalizedSSHControlCleanupOptions(_ options: [String]) -> [String] {
+        let disallowedKeys: Set<String> = ["controlmaster", "controlpersist"]
+        return options.compactMap { option in
+            let trimmed = option.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return nil }
+            guard let key = sshOptionKeyForControlCleanup(trimmed) else { return nil }
+            return disallowedKeys.contains(key) ? nil : trimmed
+        }
+    }
+
+    private static func sshOptionKeyForControlCleanup(_ option: String) -> String? {
+        let trimmed = option.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        return trimmed
+            .split(whereSeparator: { $0 == "=" || $0.isWhitespace })
+            .first
+            .map(String.init)?
+            .lowercased()
     }
 
     func applyRemoteConnectionStateUpdate(
@@ -6157,13 +8802,15 @@ final class Workspace: Identifiable, ObservableObject {
                     surfaceId: nil,
                     title: notificationTitle,
                     subtitle: target,
-                    body: trimmedDetail
+                    body: trimmedDetail,
+                    cooldownKey: remoteNotificationCooldownKey(target: target),
+                    cooldownInterval: Self.remoteNotificationCooldown
                 )
             }
             return
         }
 
-        if !preserveConnectedStateForRetry && state != .error {
+        if state == .connected {
             statusEntries.removeValue(forKey: Self.remoteErrorStatusKey)
             remoteLastErrorFingerprint = nil
         }
@@ -6202,7 +8849,27 @@ final class Workspace: Identifiable, ObservableObject {
         applyBrowserRemoteWorkspaceStatusToPanels()
     }
 
-    fileprivate func applyRemotePortsSnapshot(detected: [Int], forwarded: [Int], conflicts: [Int], target: String) {
+    fileprivate func applyRemoteDetectedSurfacePortsSnapshot(
+        detectedByPanel: [UUID: [Int]],
+        detected: [Int],
+        forwarded: [Int],
+        conflicts: [Int],
+        target: String
+    ) {
+        let trackedSurfaceIds = Set(detectedByPanel.keys)
+        for panelId in remoteDetectedSurfaceIds.subtracting(trackedSurfaceIds) {
+            surfaceListeningPorts.removeValue(forKey: panelId)
+        }
+        remoteDetectedSurfaceIds = trackedSurfaceIds
+
+        for (panelId, ports) in detectedByPanel {
+            if ports.isEmpty {
+                surfaceListeningPorts.removeValue(forKey: panelId)
+            } else {
+                surfaceListeningPorts[panelId] = ports
+            }
+        }
+
         remoteDetectedPorts = detected
         remoteForwardedPorts = forwarded
         remotePortConflicts = conflicts
@@ -6233,6 +8900,13 @@ final class Workspace: Identifiable, ObservableObject {
         )
     }
 
+    private func clearRemoteDetectedSurfacePorts() {
+        for panelId in remoteDetectedSurfaceIds {
+            surfaceListeningPorts.removeValue(forKey: panelId)
+        }
+        remoteDetectedSurfaceIds.removeAll()
+    }
+
     private func appendSidebarLog(message: String, level: SidebarLogLevel, source: String?) {
         let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
@@ -6248,9 +8922,9 @@ final class Workspace: Identifiable, ObservableObject {
 
     private func seedTerminalInheritanceFontPoints(
         panelId: UUID,
-        configTemplate: ghostty_surface_config_s?
+        configTemplate: CmuxSurfaceConfigTemplate?
     ) {
-        guard let fontPoints = configTemplate?.font_size, fontPoints > 0 else { return }
+        guard let fontPoints = configTemplate?.fontSize, fontPoints > 0 else { return }
         terminalInheritanceFontPointsByPanelId[panelId] = fontPoints
         lastTerminalConfigInheritanceFontPoints = fontPoints
     }
@@ -6258,7 +8932,7 @@ final class Workspace: Identifiable, ObservableObject {
     private func resolvedTerminalInheritanceFontPoints(
         for terminalPanel: TerminalPanel,
         sourceSurface: ghostty_surface_t,
-        inheritedConfig: ghostty_surface_config_s
+        inheritedConfig: CmuxSurfaceConfigTemplate
     ) -> Float? {
         let runtimePoints = cmuxCurrentSurfaceFontSizePoints(sourceSurface)
         if let rooted = terminalInheritanceFontPointsByPanelId[terminalPanel.id], rooted > 0 {
@@ -6269,8 +8943,8 @@ final class Workspace: Identifiable, ObservableObject {
             }
             return rooted
         }
-        if inheritedConfig.font_size > 0 {
-            return inheritedConfig.font_size
+        if inheritedConfig.fontSize > 0 {
+            return inheritedConfig.fontSize
         }
         return runtimePoints
     }
@@ -6368,14 +9042,20 @@ final class Workspace: Identifiable, ObservableObject {
     private func inheritedTerminalConfig(
         preferredPanelId: UUID? = nil,
         inPane preferredPaneId: PaneID? = nil
-    ) -> ghostty_surface_config_s? {
-        // Walk candidates in priority order and use the first panel with a live surface.
-        // This avoids returning nil when the top candidate exists but is not attached yet.
+    ) -> CmuxSurfaceConfigTemplate? {
+        // Walk candidates in priority order and use the first panel that still exposes
+        // a runtime surface pointer.
         for terminalPanel in terminalPanelConfigInheritanceCandidates(
             preferredPanelId: preferredPanelId,
             inPane: preferredPaneId
         ) {
-            guard let sourceSurface = terminalPanel.surface.surface else { continue }
+            // Pin the panel and its TerminalSurface wrapper for the duration of
+            // this iteration. The raw ghostty_surface_t extracted below is owned
+            // by `surface` (the TerminalSurface) — ARC must not release it while
+            // ghostty_surface_inherited_config or cmuxCurrentSurfaceFontSizePoints
+            // is still reading through the pointer.
+            let surface = terminalPanel.surface
+            guard let sourceSurface = surface.surface else { continue }
             var config = cmuxInheritedSurfaceConfig(
                 sourceSurface: sourceSurface,
                 context: GHOSTTY_SURFACE_CONTEXT_SPLIT
@@ -6385,21 +9065,23 @@ final class Workspace: Identifiable, ObservableObject {
                 sourceSurface: sourceSurface,
                 inheritedConfig: config
             ), rootedFontPoints > 0 {
-                config.font_size = rootedFontPoints
+                config.fontSize = rootedFontPoints
                 terminalInheritanceFontPointsByPanelId[terminalPanel.id] = rootedFontPoints
             }
+            // Prevent ARC from releasing panel/surface before the C calls above complete.
+            withExtendedLifetime((terminalPanel, surface)) {}
             rememberTerminalConfigInheritanceSource(terminalPanel)
-            if config.font_size > 0 {
-                lastTerminalConfigInheritanceFontPoints = config.font_size
+            if config.fontSize > 0 {
+                lastTerminalConfigInheritanceFontPoints = config.fontSize
             }
             return config
         }
 
         if let fallbackFontPoints = lastTerminalConfigInheritanceFontPoints {
-            var config = ghostty_surface_config_new()
-            config.font_size = fallbackFontPoints
+            var config = CmuxSurfaceConfigTemplate()
+            config.fontSize = fallbackFontPoints
 #if DEBUG
-            dlog(
+            cmuxDebugLog(
                 "zoom.inherit fallback=lastKnownFont context=split font=\(String(format: "%.2f", fallbackFontPoints))"
             )
 #endif
@@ -6450,7 +9132,7 @@ final class Workspace: Identifiable, ObservableObject {
             return workspaceDirectory.isEmpty ? nil : workspaceDirectory
         }()
 #if DEBUG
-        dlog(
+        cmuxDebugLog(
             "split.cwd panelId=\(panelId.uuidString.prefix(5)) panelDir=\(panelDirectories[panelId] ?? "nil") requestedDir=\(terminalPanel(for: panelId)?.requestedWorkingDirectory ?? "nil") currentDir=\(currentDirectory) resolved=\(splitWorkingDirectory ?? "nil")"
         )
 #endif
@@ -6464,6 +9146,7 @@ final class Workspace: Identifiable, ObservableObject {
             portOrdinal: portOrdinal,
             initialCommand: remoteTerminalStartupCommand
         )
+        configureTerminalPanel(newPanel)
         panels[newPanel.id] = newPanel
         panelTitles[newPanel.id] = newPanel.displayTitle
         if remoteTerminalStartupCommand != nil {
@@ -6502,7 +9185,7 @@ final class Workspace: Identifiable, ObservableObject {
         }
 
 #if DEBUG
-        dlog("split.created pane=\(paneId.id.uuidString.prefix(5)) orientation=\(orientation)")
+        cmuxDebugLog("split.created pane=\(paneId.id.uuidString.prefix(5)) orientation=\(orientation)")
 #endif
 
         // Suppress the old view's becomeFirstResponder side-effects during SwiftUI reparenting.
@@ -6522,6 +9205,12 @@ final class Workspace: Identifiable, ObservableObject {
             )
         }
 
+        owningTabManager?.scheduleInitialWorkspaceGitMetadataRefreshIfPossible(
+            workspaceId: id,
+            panelId: newPanel.id,
+            reason: "splitCreate"
+        )
+
         return newPanel
     }
 
@@ -6534,6 +9223,7 @@ final class Workspace: Identifiable, ObservableObject {
         inPane paneId: PaneID,
         focus: Bool? = nil,
         workingDirectory: String? = nil,
+        initialInput: String? = nil,
         startupEnvironment: [String: String] = [:]
     ) -> TerminalPanel? {
         let shouldFocusNewTab = focus ?? (bonsplitController.focusedPaneId == paneId)
@@ -6551,8 +9241,10 @@ final class Workspace: Identifiable, ObservableObject {
             workingDirectory: workingDirectory,
             portOrdinal: portOrdinal,
             initialCommand: remoteTerminalStartupCommand,
+            initialInput: initialInput,
             additionalEnvironment: startupEnvironment
         )
+        configureTerminalPanel(newPanel)
         panels[newPanel.id] = newPanel
         panelTitles[newPanel.id] = newPanel.displayTitle
         if remoteTerminalStartupCommand != nil {
@@ -6595,6 +9287,12 @@ final class Workspace: Identifiable, ObservableObject {
                 previousHostedView: previousHostedView
             )
         }
+
+        owningTabManager?.scheduleInitialWorkspaceGitMetadataRefreshIfPossible(
+            workspaceId: id,
+            panelId: newPanel.id,
+            reason: "surfaceCreate"
+        )
         return newPanel
     }
 
@@ -6644,7 +9342,6 @@ final class Workspace: Identifiable, ObservableObject {
         )
         panels[browserPanel.id] = browserPanel
         panelTitles[browserPanel.id] = browserPanel.displayTitle
-        setPreferredBrowserProfileID(browserPanel.profileID)
 
         // Pre-generate the bonsplit tab ID so the mapping exists before the split lands.
         let newTab = Bonsplit.Tab(
@@ -6668,6 +9365,7 @@ final class Workspace: Identifiable, ObservableObject {
             panelTitles.removeValue(forKey: browserPanel.id)
             return nil
         }
+        setPreferredBrowserProfileID(browserPanel.profileID)
 
         // See newTerminalSplit: suppress old view's becomeFirstResponder during reparenting.
         let previousHostedView = focusedTerminalPanel?.hostedView
@@ -6699,19 +9397,25 @@ final class Workspace: Identifiable, ObservableObject {
     func newBrowserSurface(
         inPane paneId: PaneID,
         url: URL? = nil,
+        initialRequest: URLRequest? = nil,
         focus: Bool? = nil,
         insertAtEnd: Bool = false,
         preferredProfileID: UUID? = nil,
         bypassInsecureHTTPHostOnce: String? = nil
     ) -> BrowserPanel? {
         let shouldFocusNewTab = focus ?? (bonsplitController.focusedPaneId == paneId)
+        let sourcePanelId = effectiveSelectedPanelId(inPane: paneId)
         let previousFocusedPanelId = focusedPanelId
         let previousHostedView = focusedTerminalPanel?.hostedView
 
         let browserPanel = BrowserPanel(
             workspaceId: id,
-            profileID: resolvedNewBrowserProfileID(preferredProfileID: preferredProfileID),
+            profileID: resolvedNewBrowserProfileID(
+                preferredProfileID: preferredProfileID,
+                sourcePanelId: sourcePanelId
+            ),
             initialURL: url,
+            initialRequest: initialRequest,
             bypassInsecureHTTPHostOnce: bypassInsecureHTTPHostOnce,
             proxyEndpoint: remoteProxyEndpoint,
             isRemoteWorkspace: isRemoteWorkspace,
@@ -6719,7 +9423,6 @@ final class Workspace: Identifiable, ObservableObject {
         )
         panels[browserPanel.id] = browserPanel
         panelTitles[browserPanel.id] = browserPanel.displayTitle
-        setPreferredBrowserProfileID(browserPanel.profileID)
 
         guard let newTabId = bonsplitController.createTab(
             title: browserPanel.displayTitle,
@@ -6736,6 +9439,7 @@ final class Workspace: Identifiable, ObservableObject {
         }
 
         surfaceIdToPanelId[newTabId] = browserPanel.id
+        setPreferredBrowserProfileID(browserPanel.profileID)
 
         // Keyboard/browser-open paths want "new tab at end" regardless of global new-tab placement.
         if insertAtEnd {
@@ -6761,6 +9465,34 @@ final class Workspace: Identifiable, ObservableObject {
         browserPanel.setRemoteWorkspaceStatus(browserRemoteWorkspaceStatusSnapshot())
 
         return browserPanel
+    }
+
+    /// Open the markdown viewer for `filePath`, reusing an existing
+    /// `MarkdownPanel` in this workspace that already shows the same file.
+    /// Paths are compared after symlink resolution so `./README.md` and a
+    /// symlink pointing at the same file focus the same viewer.
+    /// Returns `nil` when no existing viewer matches and split creation
+    /// fails, so callers can fall back to the preferred editor / system opener.
+    @discardableResult
+    func openOrFocusMarkdownSplit(
+        from panelId: UUID,
+        filePath: String
+    ) -> MarkdownPanel? {
+        let canonical = (filePath as NSString).resolvingSymlinksInPath
+        for (existingId, panel) in panels {
+            guard let md = panel as? MarkdownPanel else { continue }
+            if (md.filePath as NSString).resolvingSymlinksInPath == canonical {
+                focusPanel(existingId)
+                return md
+            }
+        }
+        return newMarkdownSplit(
+            from: panelId,
+            orientation: .horizontal,
+            insertFirst: false,
+            filePath: filePath,
+            focus: true
+        )
     }
 
     func newMarkdownSplit(
@@ -6874,8 +9606,15 @@ final class Workspace: Identifiable, ObservableObject {
     /// Called before the workspace is removed from TabManager to ensure child
     /// processes receive SIGHUP even if ARC deallocation is delayed.
     func teardownAllPanels() {
+        // Hide portal-hosted content up front so a workspace being torn down
+        // cannot keep drawing above the next selected/restored workspace while
+        // panel close work is still unwinding.
+        hideAllTerminalPortalViews()
+        hideAllBrowserPortalViews()
+
         let panelEntries = Array(panels)
         for (panelId, panel) in panelEntries {
+            removePendingTerminalInputObservers(forPanelId: panelId)
             panelSubscriptions.removeValue(forKey: panelId)
             PortScanner.shared.unregisterPanel(workspaceId: id, panelId: panelId)
             panel.close()
@@ -6884,8 +9623,10 @@ final class Workspace: Identifiable, ObservableObject {
         panels.removeAll(keepingCapacity: false)
         surfaceIdToPanelId.removeAll(keepingCapacity: false)
         panelSubscriptions.removeAll(keepingCapacity: false)
+        pendingRemoteTerminalChildExitSurfaceIds.removeAll(keepingCapacity: false)
         pruneSurfaceMetadata(validSurfaceIds: [])
         restoredTerminalScrollbackByPanelId.removeAll(keepingCapacity: false)
+        pendingTerminalInputObserversByPanelId.removeAll(keepingCapacity: false)
         terminalInheritanceFontPointsByPanelId.removeAll(keepingCapacity: false)
         lastTerminalConfigInheritancePanelId = nil
         lastTerminalConfigInheritanceFontPoints = nil
@@ -6913,7 +9654,7 @@ final class Workspace: Identifiable, ObservableObject {
               let focusedPane = bonsplitController.focusedPaneId,
               let selected = bonsplitController.selectedTab(inPane: focusedPane) else {
 #if DEBUG
-            dlog(
+            cmuxDebugLog(
                 "surface.close.fallback.skip panel=\(panelId.uuidString.prefix(5)) " +
                 "focusedPanel=\(focusedPanelId?.uuidString.prefix(5) ?? "nil") " +
                 "firstResponderPanel=\(firstResponderPanelId?.uuidString.prefix(5) ?? "nil") " +
@@ -6928,7 +9669,7 @@ final class Workspace: Identifiable, ObservableObject {
         }
         let closed = bonsplitController.closeTab(selected.id)
 #if DEBUG
-        dlog(
+        cmuxDebugLog(
             "surface.close.fallback panel=\(panelId.uuidString.prefix(5)) " +
             "selectedTab=\(String(describing: selected.id).prefix(5)) " +
             "closed=\(closed ? 1 : 0)"
@@ -7268,9 +10009,12 @@ final class Workspace: Identifiable, ObservableObject {
     func detachSurface(panelId: UUID) -> DetachedSurfaceTransfer? {
         guard let tabId = surfaceIdFromPanelId(panelId) else { return nil }
         guard panels[panelId] != nil else { return nil }
+        let shouldSkipControlMasterCleanupAfterDetach =
+            activeRemoteTerminalSurfaceIds.contains(panelId)
+            && activeRemoteTerminalSurfaceIds.count == 1
 #if DEBUG
         let detachStart = ProcessInfo.processInfo.systemUptime
-        dlog(
+        cmuxDebugLog(
             "split.detach.begin ws=\(id.uuidString.prefix(5)) panel=\(panelId.uuidString.prefix(5)) " +
             "tab=\(tabId.uuid.uuidString.prefix(5)) activeDetachTxn=\(activeDetachCloseTransactions) " +
             "pendingDetached=\(pendingDetachedSurfaces.count)"
@@ -7286,7 +10030,7 @@ final class Workspace: Identifiable, ObservableObject {
             pendingDetachedSurfaces.removeValue(forKey: tabId)
             forceCloseTabIds.remove(tabId)
 #if DEBUG
-            dlog(
+            cmuxDebugLog(
                 "split.detach.fail ws=\(id.uuidString.prefix(5)) panel=\(panelId.uuidString.prefix(5)) " +
                 "tab=\(tabId.uuid.uuidString.prefix(5)) reason=closeTabRejected elapsedMs=\(debugElapsedMs(since: detachStart))"
             )
@@ -7294,9 +10038,15 @@ final class Workspace: Identifiable, ObservableObject {
             return nil
         }
 
-        let detached = pendingDetachedSurfaces.removeValue(forKey: tabId)
+        var detached = pendingDetachedSurfaces.removeValue(forKey: tabId)
+        if shouldSkipControlMasterCleanupAfterDetach, let detachedTransfer = detached, detachedTransfer.isRemoteTerminal {
+            skipControlMasterCleanupAfterDetachedRemoteTransfer = true
+            if detachedTransfer.remoteCleanupConfiguration == nil {
+                detached = detachedTransfer.withRemoteCleanupConfiguration(remoteConfiguration)
+            }
+        }
 #if DEBUG
-        dlog(
+        cmuxDebugLog(
             "split.detach.end ws=\(id.uuidString.prefix(5)) panel=\(panelId.uuidString.prefix(5)) " +
             "tab=\(tabId.uuid.uuidString.prefix(5)) transfer=\(detached != nil ? 1 : 0) " +
             "elapsedMs=\(debugElapsedMs(since: detachStart))"
@@ -7314,14 +10064,14 @@ final class Workspace: Identifiable, ObservableObject {
     ) -> UUID? {
 #if DEBUG
         let attachStart = ProcessInfo.processInfo.systemUptime
-        dlog(
+        cmuxDebugLog(
             "split.attach.begin ws=\(id.uuidString.prefix(5)) panel=\(detached.panelId.uuidString.prefix(5)) " +
             "pane=\(paneId.id.uuidString.prefix(5)) index=\(index.map(String.init) ?? "nil") focus=\(focus ? 1 : 0)"
         )
 #endif
         guard bonsplitController.allPaneIds.contains(paneId) else {
 #if DEBUG
-            dlog(
+            cmuxDebugLog(
                 "split.attach.fail ws=\(id.uuidString.prefix(5)) panel=\(detached.panelId.uuidString.prefix(5)) " +
                 "reason=invalidPane elapsedMs=\(debugElapsedMs(since: attachStart))"
             )
@@ -7330,7 +10080,7 @@ final class Workspace: Identifiable, ObservableObject {
         }
         guard panels[detached.panelId] == nil else {
 #if DEBUG
-            dlog(
+            cmuxDebugLog(
                 "split.attach.fail ws=\(id.uuidString.prefix(5)) panel=\(detached.panelId.uuidString.prefix(5)) " +
                 "reason=panelExists elapsedMs=\(debugElapsedMs(since: attachStart))"
             )
@@ -7355,6 +10105,12 @@ final class Workspace: Identifiable, ObservableObject {
         if let directory = detached.directory {
             panelDirectories[detached.panelId] = directory
         }
+        if let ttyName = detached.ttyName?.trimmingCharacters(in: .whitespacesAndNewlines), !ttyName.isEmpty {
+            surfaceTTYNames[detached.panelId] = ttyName
+        } else {
+            surfaceTTYNames.removeValue(forKey: detached.panelId)
+        }
+        syncRemotePortScanTTYs()
         if let cachedTitle = detached.cachedTitle {
             panelTitles[detached.panelId] = cachedTitle
         }
@@ -7387,6 +10143,8 @@ final class Workspace: Identifiable, ObservableObject {
         ) else {
             panels.removeValue(forKey: detached.panelId)
             panelDirectories.removeValue(forKey: detached.panelId)
+            surfaceTTYNames.removeValue(forKey: detached.panelId)
+            syncRemotePortScanTTYs()
             panelTitles.removeValue(forKey: detached.panelId)
             panelCustomTitles.removeValue(forKey: detached.panelId)
             pinnedPanelIds.remove(detached.panelId)
@@ -7394,7 +10152,7 @@ final class Workspace: Identifiable, ObservableObject {
             manualUnreadMarkedAt.removeValue(forKey: detached.panelId)
             panelSubscriptions.removeValue(forKey: detached.panelId)
 #if DEBUG
-            dlog(
+            cmuxDebugLog(
                 "split.attach.fail ws=\(id.uuidString.prefix(5)) panel=\(detached.panelId.uuidString.prefix(5)) " +
                 "reason=createTabFailed elapsedMs=\(debugElapsedMs(since: attachStart))"
             )
@@ -7403,6 +10161,21 @@ final class Workspace: Identifiable, ObservableObject {
         }
 
         surfaceIdToPanelId[newTabId] = detached.panelId
+        let didAdoptWorkspaceRemoteTracking =
+            detached.isRemoteTerminal
+            && detached.remoteRelayPort == remoteConfiguration?.relayPort
+        if didAdoptWorkspaceRemoteTracking {
+            trackRemoteTerminalSurface(detached.panelId)
+        }
+        if let cleanupConfiguration = detached.remoteCleanupConfiguration {
+            if didAdoptWorkspaceRemoteTracking {
+                transferredRemoteCleanupConfigurationsByPanelId.removeValue(forKey: detached.panelId)
+            } else {
+                transferredRemoteCleanupConfigurationsByPanelId[detached.panelId] = cleanupConfiguration
+            }
+        } else {
+            transferredRemoteCleanupConfigurationsByPanelId.removeValue(forKey: detached.panelId)
+        }
         if let index {
             _ = bonsplitController.reorderTab(newTabId, toIndex: index)
         }
@@ -7421,7 +10194,7 @@ final class Workspace: Identifiable, ObservableObject {
         scheduleTerminalGeometryReconcile()
 
 #if DEBUG
-        dlog(
+        cmuxDebugLog(
             "split.attach.end ws=\(id.uuidString.prefix(5)) panel=\(detached.panelId.uuidString.prefix(5)) " +
             "tab=\(newTabId.uuid.uuidString.prefix(5)) pane=\(paneId.id.uuidString.prefix(5)) " +
             "index=\(index.map(String.init) ?? "nil") focus=\(focus ? 1 : 0) " +
@@ -7528,7 +10301,7 @@ final class Workspace: Identifiable, ObservableObject {
 #if DEBUG
         let pane = bonsplitController.focusedPaneId?.id.uuidString.prefix(5) ?? "nil"
         let triggerLabel = trigger == .terminalFirstResponder ? "firstResponder" : "standard"
-        dlog("focus.panel panel=\(panelId.uuidString.prefix(5)) pane=\(pane) trigger=\(triggerLabel)")
+        cmuxDebugLog("focus.panel panel=\(panelId.uuidString.prefix(5)) pane=\(pane) trigger=\(triggerLabel)")
         FocusLogStore.shared.append(
             "Workspace.focusPanel panelId=\(panelId.uuidString) focusedPane=\(pane) trigger=\(triggerLabel)"
         )
@@ -7562,7 +10335,7 @@ final class Workspace: Identifiable, ObservableObject {
             .flatMap { bonsplitController.selectedTab(inPane: $0)?.id }
             .map { String($0.uuid.uuidString.prefix(5)) } ?? "nil"
         let currentPanelShort = currentlyFocusedPanelId.map { String($0.uuidString.prefix(5)) } ?? "nil"
-        dlog(
+        cmuxDebugLog(
             "focus.panel.begin workspace=\(id.uuidString.prefix(5)) " +
             "panel=\(panelId.uuidString.prefix(5)) trigger=\(String(describing: trigger)) " +
             "targetPane=\(targetPaneShort) focusedPane=\(focusedPaneShort) selectedTab=\(selectedTabShort) " +
@@ -7570,7 +10343,7 @@ final class Workspace: Identifiable, ObservableObject {
             "currentPanel=\(currentPanelShort)"
         )
         if shouldSuppressReentrantRefocus {
-            dlog(
+            cmuxDebugLog(
                 "focus.panel.skipReentrant panel=\(panelId.uuidString.prefix(5)) " +
                 "reason=firstResponderAlreadyConverged"
             )
@@ -7579,7 +10352,7 @@ final class Workspace: Identifiable, ObservableObject {
 
         if let targetPaneId, !selectionAlreadyConverged {
 #if DEBUG
-            dlog(
+            cmuxDebugLog(
                 "focus.panel.focusPane workspace=\(id.uuidString.prefix(5)) " +
                 "panel=\(panelId.uuidString.prefix(5)) pane=\(targetPaneId.id.uuidString.prefix(5))"
             )
@@ -7589,7 +10362,7 @@ final class Workspace: Identifiable, ObservableObject {
 
         if !selectionAlreadyConverged {
 #if DEBUG
-            dlog(
+            cmuxDebugLog(
                 "focus.panel.selectTab workspace=\(id.uuidString.prefix(5)) " +
                 "panel=\(panelId.uuidString.prefix(5)) tab=\(tabId.uuid.uuidString.prefix(5))"
             )
@@ -7656,8 +10429,10 @@ final class Workspace: Identifiable, ObservableObject {
     }
 
     func moveFocus(direction: NavigationDirection) {
+        let previousFocusedPanelId = focusedPanelId
+
         // Unfocus the currently-focused panel before navigating.
-        if let prevPanelId = focusedPanelId, let prev = panels[prevPanelId] {
+        if let prevPanelId = previousFocusedPanelId, let prev = panels[prevPanelId] {
             prev.unfocus()
         }
 
@@ -7669,6 +10444,7 @@ final class Workspace: Identifiable, ObservableObject {
            let tabId = bonsplitController.selectedTab(inPane: paneId)?.id {
             applyTabSelection(tabId: tabId, inPane: paneId)
         }
+
     }
 
     // MARK: - Surface Navigation
@@ -7739,9 +10515,9 @@ final class Workspace: Identifiable, ObservableObject {
 
     /// Create a new terminal surface in the currently focused pane
     @discardableResult
-    func newTerminalSurfaceInFocusedPane(focus: Bool? = nil) -> TerminalPanel? {
+    func newTerminalSurfaceInFocusedPane(focus: Bool? = nil, initialInput: String? = nil) -> TerminalPanel? {
         guard let focusedPaneId = bonsplitController.focusedPaneId else { return nil }
-        return newTerminalSurface(inPane: focusedPaneId, focus: focus)
+        return newTerminalSurface(inPane: focusedPaneId, focus: focus, initialInput: initialInput)
     }
 
     @discardableResult
@@ -7793,7 +10569,7 @@ final class Workspace: Identifiable, ObservableObject {
     // MARK: - Flash/Notification Support
 
     func triggerFocusFlash(panelId: UUID) {
-        panels[panelId]?.triggerFlash()
+        requestAttentionFlash(panelId: panelId, reason: .navigation)
     }
 
     func triggerNotificationFocusFlash(
@@ -7801,7 +10577,7 @@ final class Workspace: Identifiable, ObservableObject {
         requiresSplit: Bool = false,
         shouldFocus: Bool = true
     ) {
-        guard let terminalPanel = terminalPanel(for: panelId) else { return }
+        guard terminalPanel(for: panelId) != nil else { return }
         if shouldFocus {
             focusPanel(panelId)
         }
@@ -7809,11 +10585,18 @@ final class Workspace: Identifiable, ObservableObject {
         if requiresSplit && !isSplit {
             return
         }
-        terminalPanel.triggerFlash()
+        requestAttentionFlash(panelId: panelId, reason: .notificationArrival)
+    }
+
+    func triggerNotificationDismissFlash(panelId: UUID) {
+        guard terminalPanel(for: panelId) != nil else { return }
+        requestAttentionFlash(panelId: panelId, reason: .notificationDismiss)
     }
 
     func triggerDebugFlash(panelId: UUID) {
-        triggerNotificationFocusFlash(panelId: panelId, requiresSplit: false, shouldFocus: true)
+        guard panels[panelId] != nil else { return }
+        focusPanel(panelId)
+        requestAttentionFlash(panelId: panelId, reason: .debug)
     }
 
     // MARK: - Portal Lifecycle
@@ -7851,6 +10634,7 @@ final class Workspace: Identifiable, ObservableObject {
             configTemplate: inheritedConfig,
             portOrdinal: portOrdinal
         )
+        configureTerminalPanel(newPanel)
         panels[newPanel.id] = newPanel
         panelTitles[newPanel.id] = newPanel.displayTitle
         seedTerminalInheritanceFontPoints(panelId: newPanel.id, configTemplate: inheritedConfig)
@@ -8005,21 +10789,34 @@ final class Workspace: Identifiable, ObservableObject {
             layoutFollowUpTerminalFocusPanelId = terminalFocusPanelId
         }
         layoutFollowUpNeedsGeometryPass = layoutFollowUpNeedsGeometryPass || includeGeometry
+        layoutFollowUpStalledAttemptCount = 0
+        // Invalidate any pending retry whose delay was computed from a stale stall count.
+        // Incrementing the version causes old closures to exit early; clearing the flag
+        // allows scheduleLayoutFollowUpAttempt() below to enqueue a fresh asyncAfter(0).
+        layoutFollowUpAttemptVersion &+= 1
+        layoutFollowUpAttemptScheduled = false
 
         if layoutFollowUpTimeoutWorkItem == nil {
             installLayoutFollowUpObservers()
         }
         refreshLayoutFollowUpTimeout()
-        attemptEventDrivenLayoutFollowUp()
+        // Use async scheduling instead of a synchronous call here. beginEventDrivenLayoutFollowUp
+        // is often invoked from splitTabBar(_:didChangeGeometry:), which fires from inside
+        // SwiftUI's .onChange(of: geometry) during an active layout pass. Calling
+        // attemptEventDrivenLayoutFollowUp() synchronously in that context causes
+        // flushWorkspaceWindowLayouts() → displayIfNeeded() to be called re-entrantly,
+        // incrementing AppKit's per-window constraint-pass counter on every display cycle
+        // until it exceeds the limit and crashes with NSGenericException.
+        // scheduleLayoutFollowUpAttempt() defers via asyncAfter(0) so the flush always
+        // happens after the current layout pass completes.
+        scheduleLayoutFollowUpAttempt()
     }
 
     private func installLayoutFollowUpObservers() {
         guard layoutFollowUpTimeoutWorkItem == nil else { return }
 
-        func enqueueAttempt() {
-            DispatchQueue.main.async { [weak self] in
-                self?.attemptEventDrivenLayoutFollowUp()
-            }
+        let enqueueAttempt: () -> Void = { [weak self] in
+            self?.scheduleLayoutFollowUpAttempt()
         }
 
         layoutFollowUpObservers.append(NotificationCenter.default.addObserver(
@@ -8099,6 +10896,31 @@ final class Workspace: Identifiable, ObservableObject {
         layoutFollowUpBrowserPanelId = nil
         layoutFollowUpBrowserExitFocusPanelId = nil
         layoutFollowUpNeedsGeometryPass = false
+        layoutFollowUpAttemptVersion &+= 1
+        layoutFollowUpAttemptScheduled = false
+        layoutFollowUpStalledAttemptCount = 0
+    }
+
+    private func scheduleLayoutFollowUpAttempt() {
+        guard layoutFollowUpTimeoutWorkItem != nil else { return }
+        guard !layoutFollowUpAttemptScheduled else { return }
+
+        layoutFollowUpAttemptScheduled = true
+        let delay = layoutFollowUpBackoffDelay()
+        let version = layoutFollowUpAttemptVersion
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self else { return }
+            guard self.layoutFollowUpAttemptVersion == version else { return }
+            self.layoutFollowUpAttemptScheduled = false
+            self.attemptEventDrivenLayoutFollowUp()
+        }
+    }
+
+    private func layoutFollowUpBackoffDelay() -> TimeInterval {
+        guard layoutFollowUpStalledAttemptCount > 0 else { return 0 }
+        let baseDelay: TimeInterval = 0.01
+        let exponent = min(layoutFollowUpStalledAttemptCount - 1, 5)
+        return min(0.25, baseDelay * pow(2.0, Double(exponent)))
     }
 
     private func flushWorkspaceWindowLayouts() {
@@ -8136,12 +10958,35 @@ final class Workspace: Identifiable, ObservableObject {
         return !selectionConverged || !browserPortalAnchorReady(for: browserPanel)
     }
 
+    private func terminalFocusNeedsFollowUp() -> Bool {
+        guard let panelId = layoutFollowUpTerminalFocusPanelId,
+              let terminalPanel = terminalPanel(for: panelId) else {
+            return false
+        }
+        return focusedPanelId != panelId || !terminalPanel.hostedView.isSurfaceViewFirstResponder()
+    }
+
+    private func browserPanelNeedsFollowUp() -> Bool {
+        guard let panelId = layoutFollowUpBrowserPanelId,
+              let browserPanel = browserPanel(for: panelId) else {
+            return false
+        }
+        return !browserPortalReady(for: browserPanel)
+    }
+
     private func attemptEventDrivenLayoutFollowUp() {
         guard layoutFollowUpTimeoutWorkItem != nil, !isAttemptingLayoutFollowUp else { return }
         isAttemptingLayoutFollowUp = true
         defer { isAttemptingLayoutFollowUp = false }
 
         flushWorkspaceWindowLayouts()
+
+        let geometryPendingBefore = layoutFollowUpNeedsGeometryPass
+        let terminalPortalPendingBefore = terminalPortalVisibilityNeedsFollowUp()
+        let browserVisibilityPendingBefore = browserPortalVisibilityNeedsFollowUp()
+        let terminalFocusPendingBefore = terminalFocusNeedsFollowUp()
+        let browserPanelPendingBefore = browserPanelNeedsFollowUp()
+        let browserExitPendingBefore = layoutFollowUpBrowserExitFocusPanelId != nil
 
         if layoutFollowUpNeedsGeometryPass {
             layoutFollowUpNeedsGeometryPass = reconcileTerminalGeometryPass()
@@ -8168,14 +11013,20 @@ final class Workspace: Identifiable, ObservableObject {
 
         if let browserPanelId = layoutFollowUpBrowserPanelId {
             if let browserPanel = browserPanel(for: browserPanelId) {
-                if browserPortalAnchorReady(for: browserPanel) {
+                let anchorReady = browserPortalAnchorReady(for: browserPanel)
+                let wasReady = browserPortalReady(for: browserPanel)
+                if anchorReady && !wasReady {
                     BrowserWindowPortalRegistry.synchronizeForAnchor(browserPanel.portalAnchorView)
+                }
+                let isReady = browserPortalReady(for: browserPanel)
+                if isReady,
+                   (!wasReady || BrowserWindowPortalRegistry.debugSnapshot(for: browserPanel.webView)?.containerHidden == true) {
                     BrowserWindowPortalRegistry.refresh(
                         webView: browserPanel.webView,
                         reason: reason
                     )
                 }
-                if browserPortalReady(for: browserPanel) {
+                if isReady {
                     layoutFollowUpBrowserPanelId = nil
                 }
             } else {
@@ -8196,20 +11047,8 @@ final class Workspace: Identifiable, ObservableObject {
             }
         }
 
-        let terminalFocusPending: Bool = {
-            guard let panelId = layoutFollowUpTerminalFocusPanelId,
-                  let terminalPanel = terminalPanel(for: panelId) else {
-                return false
-            }
-            return focusedPanelId != panelId || !terminalPanel.hostedView.isSurfaceViewFirstResponder()
-        }()
-        let browserPanelPending: Bool = {
-            guard let panelId = layoutFollowUpBrowserPanelId,
-                  let browserPanel = browserPanel(for: panelId) else {
-                return false
-            }
-            return !browserPortalReady(for: browserPanel)
-        }()
+        let terminalFocusPending = terminalFocusNeedsFollowUp()
+        let browserPanelPending = browserPanelNeedsFollowUp()
         let browserExitPending = layoutFollowUpBrowserExitFocusPanelId != nil
         let needsMoreWork =
             layoutFollowUpNeedsGeometryPass ||
@@ -8221,6 +11060,22 @@ final class Workspace: Identifiable, ObservableObject {
 
         if !needsMoreWork {
             clearLayoutFollowUp()
+            return
+        }
+
+        let didMakeProgress =
+            (geometryPendingBefore && !layoutFollowUpNeedsGeometryPass) ||
+            (terminalPortalPendingBefore && !terminalPortalPending) ||
+            (browserVisibilityPendingBefore && !browserVisibilityPending) ||
+            (terminalFocusPendingBefore && !terminalFocusPending) ||
+            (browserPanelPendingBefore && !browserPanelPending) ||
+            (browserExitPendingBefore && !browserExitPending)
+
+        if didMakeProgress {
+            layoutFollowUpStalledAttemptCount = 0
+            scheduleLayoutFollowUpAttempt()
+        } else {
+            layoutFollowUpStalledAttemptCount += 1
         }
     }
 
@@ -8294,19 +11149,30 @@ final class Workspace: Identifiable, ObservableObject {
         return visiblePanelIds
     }
 
-    private func reconcileTerminalPortalVisibilityForCurrentRenderedLayout() {
+    @discardableResult
+    private func reconcileTerminalPortalVisibilityForCurrentRenderedLayout() -> Bool {
         let visiblePanelIds = renderedVisiblePanelIdsForCurrentLayout()
+        var didChange = false
 
         for panel in panels.values {
             guard let terminalPanel = panel as? TerminalPanel else { continue }
             let shouldBeVisible = visiblePanelIds.contains(terminalPanel.id)
-            terminalPanel.hostedView.setVisibleInUI(shouldBeVisible)
-            terminalPanel.hostedView.setActive(shouldBeVisible && focusedPanelId == terminalPanel.id)
+            if terminalPanel.hostedView.debugPortalVisibleInUI != shouldBeVisible {
+                terminalPanel.hostedView.setVisibleInUI(shouldBeVisible)
+                didChange = true
+            }
+            let shouldBeActive = shouldBeVisible && focusedPanelId == terminalPanel.id
+            if terminalPanel.hostedView.debugPortalActive != shouldBeActive {
+                terminalPanel.hostedView.setActive(shouldBeActive)
+                didChange = true
+            }
             TerminalWindowPortalRegistry.updateEntryVisibility(
                 for: terminalPanel.hostedView,
                 visibleInUI: shouldBeVisible
             )
         }
+
+        return didChange
     }
 
     private func terminalPortalVisibilityNeedsFollowUp() -> Bool {
@@ -8329,43 +11195,65 @@ final class Workspace: Identifiable, ObservableObject {
         return false
     }
 
-    private func reconcileBrowserPortalVisibilityForCurrentRenderedLayout(reason: String) {
+    @discardableResult
+    private func reconcileBrowserPortalVisibilityForCurrentRenderedLayout(reason: String) -> Bool {
         let visiblePanelIds = renderedVisiblePanelIdsForCurrentLayout()
+        var didChange = false
 
         for panel in panels.values {
             guard let browserPanel = panel as? BrowserPanel else { continue }
             let shouldBeVisible = visiblePanelIds.contains(browserPanel.id)
+            let anchorView = browserPanel.portalAnchorView
+            let snapshot = BrowserWindowPortalRegistry.debugSnapshot(for: browserPanel.webView)
             if shouldBeVisible {
-                BrowserWindowPortalRegistry.updateEntryVisibility(
-                    for: browserPanel.webView,
-                    visibleInUI: true,
-                    zPriority: 2
-                )
-                let anchorView = browserPanel.portalAnchorView
-                let anchorReady =
-                    anchorView.window != nil &&
-                    anchorView.superview != nil &&
-                    anchorView.bounds.width > 1 &&
-                    anchorView.bounds.height > 1
-                if anchorReady {
+                if snapshot?.visibleInUI == false {
+                    BrowserWindowPortalRegistry.updateEntryVisibility(
+                        for: browserPanel.webView,
+                        visibleInUI: true,
+                        zPriority: 2
+                    )
+                    didChange = true
+                }
+                let anchorReady = browserPortalAnchorReady(for: browserPanel)
+                let portalReady = browserPortalReady(for: browserPanel)
+                if anchorReady && !portalReady {
                     BrowserWindowPortalRegistry.synchronizeForAnchor(anchorView)
+                    if browserPortalReady(for: browserPanel) {
+                        BrowserWindowPortalRegistry.refresh(
+                            webView: browserPanel.webView,
+                            reason: reason
+                        )
+                        didChange = true
+                    }
+                } else if anchorReady && snapshot?.containerHidden == true {
                     BrowserWindowPortalRegistry.refresh(
                         webView: browserPanel.webView,
                         reason: reason
                     )
+                    didChange = true
                 }
             } else {
-                BrowserWindowPortalRegistry.updateEntryVisibility(
-                    for: browserPanel.webView,
-                    visibleInUI: false,
-                    zPriority: 0
-                )
-                BrowserWindowPortalRegistry.hide(
-                    webView: browserPanel.webView,
-                    source: reason
-                )
+                let portalNeedsHide =
+                    snapshot?.visibleInUI == true ||
+                    snapshot?.containerHidden == false
+                if portalNeedsHide {
+                    if snapshot?.visibleInUI == true {
+                        BrowserWindowPortalRegistry.updateEntryVisibility(
+                            for: browserPanel.webView,
+                            visibleInUI: false,
+                            zPriority: 0
+                        )
+                    }
+                    BrowserWindowPortalRegistry.hide(
+                        webView: browserPanel.webView,
+                        source: reason
+                    )
+                    didChange = true
+                }
             }
         }
+
+        return didChange
     }
 
     private func browserPortalVisibilityNeedsFollowUp() -> Bool {
@@ -8483,15 +11371,15 @@ final class Workspace: Identifiable, ObservableObject {
               let panel = panels[panelId] else { return }
 
         let alert = NSAlert()
-        alert.messageText = "Rename Tab"
-        alert.informativeText = "Enter a custom name for this tab."
+        alert.messageText = String(localized: "alert.renameTab.title", defaultValue: "Rename Tab")
+        alert.informativeText = String(localized: "alert.renameTab.message", defaultValue: "Enter a custom name for this tab.")
         let currentTitle = panelCustomTitles[panelId] ?? panelTitles[panelId] ?? panel.displayTitle
         let input = NSTextField(string: currentTitle)
-        input.placeholderString = "Tab name"
+        input.placeholderString = String(localized: "alert.renameTab.placeholder", defaultValue: "Tab name")
         input.frame = NSRect(x: 0, y: 0, width: 240, height: 22)
         alert.accessoryView = input
-        alert.addButton(withTitle: "Rename")
-        alert.addButton(withTitle: "Cancel")
+        alert.addButton(withTitle: String(localized: "alert.renameTab.rename", defaultValue: "Rename"))
+        alert.addButton(withTitle: String(localized: "alert.cancel", defaultValue: "Cancel"))
         let alertWindow = alert.window
         alertWindow.initialFirstResponder = input
         DispatchQueue.main.async {
@@ -8520,24 +11408,24 @@ final class Workspace: Identifiable, ObservableObject {
         )
 
         var options: [(title: String, destination: PanelMoveDestination)] = [
-            ("New Workspace in Current Window", .newWorkspaceInCurrentWindow),
-            ("Selected Workspace in New Window", .selectedWorkspaceInNewWindow),
+            (String(localized: "alert.moveTab.newWorkspaceInCurrentWindow", defaultValue: "New Workspace in Current Window"), .newWorkspaceInCurrentWindow),
+            (String(localized: "alert.moveTab.selectedWorkspaceInNewWindow", defaultValue: "Selected Workspace in New Window"), .selectedWorkspaceInNewWindow),
         ]
         options.append(contentsOf: workspaceTargets.map { target in
             (target.label, .existingWorkspace(target.workspaceId))
         })
 
         let alert = NSAlert()
-        alert.messageText = "Move Tab"
-        alert.informativeText = "Choose a destination for this tab."
+        alert.messageText = String(localized: "alert.moveTab.title", defaultValue: "Move Tab")
+        alert.informativeText = String(localized: "alert.moveTab.message", defaultValue: "Choose a destination for this tab.")
         let popup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 320, height: 26), pullsDown: false)
         for option in options {
             popup.addItem(withTitle: option.title)
         }
         popup.selectItem(at: 0)
         alert.accessoryView = popup
-        alert.addButton(withTitle: "Move")
-        alert.addButton(withTitle: "Cancel")
+        alert.addButton(withTitle: String(localized: "alert.moveTab.move", defaultValue: "Move"))
+        alert.addButton(withTitle: String(localized: "alert.cancel", defaultValue: "Cancel"))
 
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         let selectedIndex = max(0, min(popup.indexOfSelectedItem, options.count - 1))
@@ -8583,14 +11471,101 @@ final class Workspace: Identifiable, ObservableObject {
         if !moved {
             let failure = NSAlert()
             failure.alertStyle = .warning
-            failure.messageText = "Move Failed"
-            failure.informativeText = "cmux could not move this tab to the selected destination."
-            failure.addButton(withTitle: "OK")
+            failure.messageText = String(localized: "alert.moveTab.failed.title", defaultValue: "Move Failed")
+            failure.informativeText = String(localized: "alert.moveTab.failed.message", defaultValue: "cmux could not move this tab to the selected destination.")
+            failure.addButton(withTitle: String(localized: "alert.ok", defaultValue: "OK"))
             _ = failure.runModal()
         }
     }
 
+    private func handleSessionDrop(
+        entry: SessionEntry,
+        destination: BonsplitController.ExternalTabDropRequest.Destination
+    ) -> Bool {
+        let inputWithReturn = entry.resumeCommand + "\n"
+        switch destination {
+        case .insert(let paneId, _):
+            let panel = newTerminalSurface(
+                inPane: paneId,
+                focus: true,
+                workingDirectory: entry.cwd,
+                initialInput: inputWithReturn
+            )
+            return panel != nil
+        case .split(let paneId, let orientation, let insertFirst):
+            let panel = splitPaneWithNewTerminal(
+                targetPane: paneId,
+                orientation: orientation,
+                insertFirst: insertFirst,
+                workingDirectory: entry.cwd,
+                initialInput: inputWithReturn
+            )
+            return panel != nil
+        }
+    }
+
+    /// Split `paneId` and place a brand-new terminal in the resulting pane.
+    /// Used by the session-index drop path; mirrors `newTerminalSplit(from:...)` but
+    /// targets a destination pane directly rather than inheriting from a source panel.
+    @discardableResult
+    func splitPaneWithNewTerminal(
+        targetPane paneId: PaneID,
+        orientation: SplitOrientation,
+        insertFirst: Bool,
+        workingDirectory: String?,
+        initialInput: String?
+    ) -> TerminalPanel? {
+        let inheritedConfig = inheritedTerminalConfig(inPane: paneId)
+
+        let newPanel = TerminalPanel(
+            workspaceId: id,
+            context: GHOSTTY_SURFACE_CONTEXT_SPLIT,
+            configTemplate: inheritedConfig,
+            workingDirectory: workingDirectory,
+            portOrdinal: portOrdinal,
+            initialInput: initialInput
+        )
+        configureTerminalPanel(newPanel)
+        panels[newPanel.id] = newPanel
+        panelTitles[newPanel.id] = newPanel.displayTitle
+        seedTerminalInheritanceFontPoints(panelId: newPanel.id, configTemplate: inheritedConfig)
+
+        let newTab = Bonsplit.Tab(
+            title: newPanel.displayTitle,
+            icon: newPanel.displayIcon,
+            kind: SurfaceKind.terminal,
+            isDirty: newPanel.isDirty,
+            isPinned: false
+        )
+        surfaceIdToPanelId[newTab.id] = newPanel.id
+
+        isProgrammaticSplit = true
+        defer { isProgrammaticSplit = false }
+        guard bonsplitController.splitPane(
+            paneId,
+            orientation: orientation,
+            withTab: newTab,
+            insertFirst: insertFirst
+        ) != nil else {
+            panels.removeValue(forKey: newPanel.id)
+            panelTitles.removeValue(forKey: newPanel.id)
+            surfaceIdToPanelId.removeValue(forKey: newTab.id)
+            terminalInheritanceFontPointsByPanelId.removeValue(forKey: newPanel.id)
+            return nil
+        }
+
+        bonsplitController.selectTab(newTab.id)
+        newPanel.focus()
+        return newPanel
+    }
+
     private func handleExternalTabDrop(_ request: BonsplitController.ExternalTabDropRequest) -> Bool {
+        // Session-index drag → spawn a brand new terminal at the destination instead
+        // of moving an existing tab.
+        if let entry = SessionDragRegistry.shared.consume(id: request.tabId.uuid) {
+            return handleSessionDrop(entry: entry, destination: request.destination)
+        }
+
         guard let app = AppDelegate.shared else { return false }
 #if DEBUG
         let dropStart = ProcessInfo.processInfo.systemUptime
@@ -8621,7 +11596,7 @@ final class Workspace: Identifiable, ObservableObject {
         }
 
         #if DEBUG
-        dlog(
+        cmuxDebugLog(
             "split.externalDrop.begin ws=\(id.uuidString.prefix(5)) tab=\(request.tabId.uuid.uuidString.prefix(5)) " +
             "sourcePane=\(request.sourcePaneId.id.uuidString.prefix(5)) destination=\(destinationLabel)"
         )
@@ -8636,7 +11611,7 @@ final class Workspace: Identifiable, ObservableObject {
             focusWindow: true
         )
 #if DEBUG
-        dlog(
+        cmuxDebugLog(
             "split.externalDrop.end ws=\(id.uuidString.prefix(5)) tab=\(request.tabId.uuid.uuidString.prefix(5)) " +
             "moved=\(moved ? 1 : 0) elapsedMs=\(debugElapsedMs(since: dropStart))"
         )
@@ -8663,9 +11638,39 @@ extension Workspace: BonsplitDelegate {
 
     @MainActor
     private func confirmClosePanel(for tabId: TabID) async -> Bool {
+        let title = String(localized: "dialog.closeTab.title", defaultValue: "Close tab?")
+        let panelName: String? = {
+            guard let panelId = panelIdFromSurfaceId(tabId) else { return nil }
+            if let custom = panelCustomTitles[panelId], !custom.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return custom
+            }
+            if let title = panelTitles[panelId], !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return title
+            }
+            if let dir = panelDirectories[panelId], !dir.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return (dir as NSString).lastPathComponent
+            }
+            return nil
+        }()
+
+        let message: String
+        if let panelName {
+            message = String(localized: "dialog.closeTab.messageNamed", defaultValue: "This will close \"\(panelName)\".")
+        } else {
+            message = String(localized: "dialog.closeTab.message", defaultValue: "This will close the current tab.")
+        }
+
+        if let confirmCloseHandler = (
+            owningTabManager
+            ?? AppDelegate.shared?.tabManagerFor(tabId: id)
+            ?? AppDelegate.shared?.tabManager
+        )?.confirmCloseHandler {
+            return confirmCloseHandler(title, message, false)
+        }
+
         let alert = NSAlert()
-        alert.messageText = String(localized: "dialog.closeTab.title", defaultValue: "Close tab?")
-        alert.informativeText = String(localized: "dialog.closeTab.message", defaultValue: "This will close the current tab.")
+        alert.messageText = title
+        alert.informativeText = message
         alert.alertStyle = .warning
         alert.addButton(withTitle: String(localized: "dialog.closeTab.close", defaultValue: "Close"))
         alert.addButton(withTitle: String(localized: "dialog.closeTab.cancel", defaultValue: "Cancel"))
@@ -8730,6 +11735,16 @@ extension Workspace: BonsplitDelegate {
         }
     }
 
+    /// Hide browser portals for tabs that are no longer selected in the given pane.
+    private func hideBrowserPortalsForDeselectedTabs(inPane pane: PaneID, selectedTabId: TabID) {
+        for tab in bonsplitController.tabs(inPane: pane) {
+            guard tab.id != selectedTabId else { continue }
+            guard let panelId = panelIdFromSurfaceId(tab.id),
+                  let browserPanel = panels[panelId] as? BrowserPanel else { continue }
+            browserPanel.hideBrowserPortalView(source: "tabDeselected")
+        }
+    }
+
     private func applyTabSelectionNow(
         tabId: TabID,
         inPane pane: PaneID,
@@ -8743,7 +11758,7 @@ extension Workspace: BonsplitDelegate {
         let selectedTabBefore = bonsplitController.focusedPaneId
             .flatMap { bonsplitController.selectedTab(inPane: $0)?.id }
             .map { String($0.uuid.uuidString.prefix(5)) } ?? "nil"
-        dlog(
+        cmuxDebugLog(
             "focus.split.apply.begin workspace=\(id.uuidString.prefix(5)) " +
             "pane=\(pane.id.uuidString.prefix(5)) tab=\(tabId.uuid.uuidString.prefix(5)) " +
             "focusedPane=\(focusedPaneBefore) selectedTab=\(selectedTabBefore) " +
@@ -8809,6 +11824,13 @@ extension Workspace: BonsplitDelegate {
             p.unfocus()
         }
 
+        // Explicitly hide browser portals for deselected tabs in this pane.
+        // Bonsplit's keepAllAlive mode hides non-selected tabs via SwiftUI .opacity(0),
+        // but portal-hosted WKWebViews render at the window level in AppKit and are not
+        // affected by SwiftUI opacity. Without an explicit hide, the deselected browser's
+        // portal layer can remain visible above the newly selected tab.
+        hideBrowserPortalsForDeselectedTabs(inPane: focusedPane, selectedTabId: selectedTabId)
+
         if let focusWindow = activationWindow(for: panel) {
             yieldForeignOwnedFocusIfNeeded(
                 in: focusWindow,
@@ -8859,7 +11881,7 @@ extension Workspace: BonsplitDelegate {
                !terminalPanel.hostedView.isSurfaceViewFirstResponder() {
 #if DEBUG
                 let previousExists = previousTerminalHostedView != nil ? 1 : 0
-                dlog(
+                cmuxDebugLog(
                     "focus.split.moveFocus workspace=\(id.uuidString.prefix(5)) " +
                     "panel=\(panelId.uuidString.prefix(5)) previousExists=\(previousExists) " +
                     "to=\(panelId.uuidString.prefix(5))"
@@ -8868,7 +11890,7 @@ extension Workspace: BonsplitDelegate {
                 terminalPanel.hostedView.moveFocus(from: previousTerminalHostedView)
             }
 #if DEBUG
-            dlog(
+            cmuxDebugLog(
                 "focus.split.ensureFocus workspace=\(id.uuidString.prefix(5)) " +
                 "panel=\(panelId.uuidString.prefix(5)) pane=\(focusedPane.id.uuidString.prefix(5)) " +
                 "tab=\(selectedTabId.uuid.uuidString.prefix(5)) intent=\(String(describing: activationIntent))"
@@ -8880,6 +11902,8 @@ extension Workspace: BonsplitDelegate {
         if shouldRestoreFocusIntentAfterActivation(activationIntent) {
             _ = panel.restoreFocusIntent(activationIntent)
         }
+
+        surfaceTabBarDirectory = configTrackingDirectory(for: panelId)
 
         // Update current directory if this is a terminal
         if let dir = panelDirectories[panelId] {
@@ -8899,7 +11923,7 @@ extension Workspace: BonsplitDelegate {
         )
 #if DEBUG
         let prevPanelShort = previousFocusedPanelId.map { String($0.uuidString.prefix(5)) } ?? "nil"
-        dlog(
+        cmuxDebugLog(
             "focus.split.apply.end workspace=\(id.uuidString.prefix(5)) " +
             "panel=\(panelId.uuidString.prefix(5)) type=\(String(describing: type(of: panel))) " +
             "focusedPane=\(focusedPane.id.uuidString.prefix(5)) selectedTab=\(selectedTabId.uuid.uuidString.prefix(5)) " +
@@ -8954,7 +11978,7 @@ extension Workspace: BonsplitDelegate {
         for (panelId, panel) in panels where panelId != targetPanelId {
             guard let ownedIntent = panel.ownedFocusIntent(for: firstResponder, in: window) else { continue }
 #if DEBUG
-            dlog(
+            cmuxDebugLog(
                 "focus.handoff.begin workspace=\(id.uuidString.prefix(5)) " +
                 "fromPanel=\(panelId.uuidString.prefix(5)) toPanel=\(targetPanelId.uuidString.prefix(5)) " +
                 "fromIntent=\(String(describing: ownedIntent)) toIntent=\(String(describing: targetIntent))"
@@ -9081,6 +12105,14 @@ extension Workspace: BonsplitDelegate {
             return true
         }
 
+        let closeConfirmationManager = owningTabManager
+            ?? AppDelegate.shared?.tabManagerFor(tabId: id)
+            ?? AppDelegate.shared?.tabManager
+        if let closeConfirmationManager, closeConfirmationManager.isCloseConfirmationInFlight {
+            clearStagedClosedBrowserRestoreSnapshot(for: tab.id)
+            return false
+        }
+
         if let panelId = panelIdFromSurfaceId(tab.id),
            pinnedPanelIds.contains(panelId) {
             clearStagedClosedBrowserRestoreSnapshot(for: tab.id)
@@ -9111,12 +12143,23 @@ extension Workspace: BonsplitDelegate {
                 return false
             }
 
+            let confirmationManager = owningTabManager ?? AppDelegate.shared?.tabManagerFor(tabId: id) ?? AppDelegate.shared?.tabManager
+            if let confirmationManager, !confirmationManager.beginCloseConfirmationSession() {
+                return false
+            }
+
             pendingCloseConfirmTabIds.insert(tab.id)
             let tabId = tab.id
             DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
+                guard let self else {
+                    confirmationManager?.endCloseConfirmationSession()
+                    return
+                }
                 Task { @MainActor in
-                    defer { self.pendingCloseConfirmTabIds.remove(tabId) }
+                    defer {
+                        self.pendingCloseConfirmTabIds.remove(tabId)
+                        confirmationManager?.endCloseConfirmationSession()
+                    }
 
                     // If the tab disappeared while we were scheduling, do nothing.
                     guard self.panelIdFromSurfaceId(tabId) != nil else { return }
@@ -9160,6 +12203,8 @@ extension Workspace: BonsplitDelegate {
         #endif
 
         let panel = panels[panelId]
+        removePendingTerminalInputObservers(forPanelId: panelId)
+        let transferredRemoteCleanupConfiguration = transferredRemoteCleanupConfigurationsByPanelId.removeValue(forKey: panelId)
 
         if isDetaching, let panel {
             let browserPanel = panel as? BrowserPanel
@@ -9175,9 +12220,15 @@ extension Workspace: BonsplitDelegate {
                 isLoading: browserPanel?.isLoading ?? false,
                 isPinned: pinnedPanelIds.contains(panelId),
                 directory: panelDirectories[panelId],
+                ttyName: surfaceTTYNames[panelId],
                 cachedTitle: cachedTitle,
                 customTitle: panelCustomTitles[panelId],
-                manuallyUnread: manualUnreadPanelIds.contains(panelId)
+                manuallyUnread: manualUnreadPanelIds.contains(panelId),
+                isRemoteTerminal: activeRemoteTerminalSurfaceIds.contains(panelId),
+                remoteRelayPort: activeRemoteTerminalSurfaceIds.contains(panelId)
+                    ? remoteConfiguration?.relayPort
+                    : nil,
+                remoteCleanupConfiguration: transferredRemoteCleanupConfiguration
             )
         } else {
             if let closedBrowserRestoreSnapshot {
@@ -9188,6 +12239,7 @@ extension Workspace: BonsplitDelegate {
 
         panels.removeValue(forKey: panelId)
         untrackRemoteTerminalSurface(panelId)
+        pendingRemoteTerminalChildExitSurfaceIds.remove(panelId)
         surfaceIdToPanelId.removeValue(forKey: tabId)
         panelDirectories.removeValue(forKey: panelId)
         panelGitBranches.removeValue(forKey: panelId)
@@ -9200,13 +12252,20 @@ extension Workspace: BonsplitDelegate {
         panelSubscriptions.removeValue(forKey: panelId)
         panelShellActivityStates.removeValue(forKey: panelId)
         surfaceTTYNames.removeValue(forKey: panelId)
+        syncRemotePortScanTTYs()
         restoredTerminalScrollbackByPanelId.removeValue(forKey: panelId)
+        restoredAgentSnapshotsByPanelId.removeValue(forKey: panelId)
+        restoredAgentAutoResumePendingPanelIds.remove(panelId)
+        invalidatedRestoredAgentFingerprintsByPanelId.removeValue(forKey: panelId)
         PortScanner.shared.unregisterPanel(workspaceId: id, panelId: panelId)
         terminalInheritanceFontPointsByPanelId.removeValue(forKey: panelId)
         if lastTerminalConfigInheritancePanelId == panelId {
             lastTerminalConfigInheritancePanelId = nil
         }
         clearRemoteConfigurationIfWorkspaceBecameLocal()
+        if !isDetaching, let transferredRemoteCleanupConfiguration {
+            Self.requestSSHControlMasterCleanupIfNeeded(configuration: transferredRemoteCleanupConfiguration)
+        }
         AppDelegate.shared?.notificationStore?.clearNotifications(forTabId: id, surfaceId: panelId)
 
         // Keep the workspace invariant for normal close paths.
@@ -9275,12 +12334,12 @@ extension Workspace: BonsplitDelegate {
             .map { String(String(describing: $0.id).prefix(5)) } ?? "nil"
         let focusedPaneBefore = controller.focusedPaneId?.id.uuidString.prefix(5) ?? "nil"
         let focusedPanelBefore = focusedPanelId?.uuidString.prefix(5) ?? "nil"
-        dlog(
+        cmuxDebugLog(
             "split.moveTab idx=\(debugDidMoveTabEventCount) dtSincePrevMs=\(sincePrev) panel=\(movedPanel) " +
             "from=\(source.id.uuidString.prefix(5)) to=\(destination.id.uuidString.prefix(5)) " +
             "sourceTabs=\(controller.tabs(inPane: source).count) destTabs=\(controller.tabs(inPane: destination).count)"
         )
-        dlog(
+        cmuxDebugLog(
             "split.moveTab.state.before idx=\(debugDidMoveTabEventCount) panel=\(movedPanel) " +
             "destSelected=\(selectedBefore) focusedPane=\(focusedPaneBefore) focusedPanel=\(focusedPanelBefore)"
         )
@@ -9298,7 +12357,7 @@ extension Workspace: BonsplitDelegate {
         let focusedPaneAfter = controller.focusedPaneId?.id.uuidString.prefix(5) ?? "nil"
         let focusedPanelAfter = focusedPanelId?.uuidString.prefix(5) ?? "nil"
         let movedPanelFocused = (movedPanelIdAfter != nil && movedPanelIdAfter == focusedPanelId) ? 1 : 0
-        dlog(
+        cmuxDebugLog(
             "split.moveTab.state.after idx=\(debugDidMoveTabEventCount) panel=\(movedPanel) " +
             "destSelected=\(selectedAfter) focusedPane=\(focusedPaneAfter) focusedPanel=\(focusedPanelAfter) " +
             "movedFocused=\(movedPanelFocused)"
@@ -9335,9 +12394,11 @@ extension Workspace: BonsplitDelegate {
 
         if !closedPanelIds.isEmpty {
             for panelId in closedPanelIds {
+                removePendingTerminalInputObservers(forPanelId: panelId)
                 panels[panelId]?.close()
                 panels.removeValue(forKey: panelId)
                 untrackRemoteTerminalSurface(panelId)
+                pendingRemoteTerminalChildExitSurfaceIds.remove(panelId)
                 panelDirectories.removeValue(forKey: panelId)
                 panelGitBranches.removeValue(forKey: panelId)
                 panelPullRequests.removeValue(forKey: panelId)
@@ -9350,9 +12411,13 @@ extension Workspace: BonsplitDelegate {
                 surfaceTTYNames.removeValue(forKey: panelId)
                 surfaceListeningPorts.removeValue(forKey: panelId)
                 restoredTerminalScrollbackByPanelId.removeValue(forKey: panelId)
+                restoredAgentSnapshotsByPanelId.removeValue(forKey: panelId)
+                restoredAgentAutoResumePendingPanelIds.remove(panelId)
+                invalidatedRestoredAgentFingerprintsByPanelId.removeValue(forKey: panelId)
                 PortScanner.shared.unregisterPanel(workspaceId: id, panelId: panelId)
             }
 
+            syncRemotePortScanTTYs()
             let closedSet = Set(closedPanelIds)
             surfaceIdToPanelId = surfaceIdToPanelId.filter { !closedSet.contains($0.value) }
             recomputeListeningPorts()
@@ -9406,7 +12471,7 @@ extension Workspace: BonsplitDelegate {
         }
         let originalSelectedKind = controller.selectedTab(inPane: originalPane).map { panelKindForTab($0.id) } ?? "none"
         let newSelectedKind = controller.selectedTab(inPane: newPane).map { panelKindForTab($0.id) } ?? "none"
-        dlog(
+        cmuxDebugLog(
             "split.didSplit original=\(originalPane.id.uuidString.prefix(5)) new=\(newPane.id.uuidString.prefix(5)) " +
             "orientation=\(orientation) programmatic=\(isProgrammaticSplit ? 1 : 0) " +
             "originalTabs=\(controller.tabs(inPane: originalPane).count) newTabs=\(controller.tabs(inPane: newPane).count) " +
@@ -9450,7 +12515,7 @@ extension Workspace: BonsplitDelegate {
             let originalTabs = controller.tabs(inPane: originalPane)
             let hasRealSurface = originalTabs.contains { panelIdFromSurfaceId($0.id) != nil }
 #if DEBUG
-            dlog(
+            cmuxDebugLog(
                 "split.didSplit.drag original=\(originalPane.id.uuidString.prefix(5)) " +
                 "new=\(newPane.id.uuidString.prefix(5)) originalTabs=\(originalTabs.count) " +
                 "newTabs=\(controller.tabs(inPane: newPane).count) hasRealSurface=\(hasRealSurface ? 1 : 0) " +
@@ -9460,7 +12525,7 @@ extension Workspace: BonsplitDelegate {
             if !hasRealSurface {
                 let placeholderTabs = originalTabs.filter { panelIdFromSurfaceId($0.id) == nil }
 #if DEBUG
-                dlog(
+                cmuxDebugLog(
                     "split.placeholderRepair pane=\(originalPane.id.uuidString.prefix(5)) " +
                     "action=reusePlaceholder placeholderCount=\(placeholderTabs.count)"
                 )
@@ -9477,6 +12542,7 @@ extension Workspace: BonsplitDelegate {
                         configTemplate: inheritedConfig,
                         portOrdinal: portOrdinal
                     )
+                    configureTerminalPanel(replacementPanel)
                     panels[replacementPanel.id] = replacementPanel
                     panelTitles[replacementPanel.id] = replacementPanel.displayTitle
                     seedTerminalInheritanceFontPoints(panelId: replacementPanel.id, configTemplate: inheritedConfig)
@@ -9500,7 +12566,7 @@ extension Workspace: BonsplitDelegate {
                     }
                 } else {
 #if DEBUG
-                    dlog(
+                    cmuxDebugLog(
                         "split.placeholderRepair pane=\(originalPane.id.uuidString.prefix(5)) " +
                         "fallback=createTerminalAndDropPlaceholders"
                     )
@@ -9526,7 +12592,7 @@ extension Workspace: BonsplitDelegate {
         let sourcePanelId = sourceTabId.flatMap { panelIdFromSurfaceId($0) }
 
 #if DEBUG
-        dlog(
+        cmuxDebugLog(
             "split.didSplit.autoCreate pane=\(newPane.id.uuidString.prefix(5)) " +
             "fromPane=\(originalPane.id.uuidString.prefix(5)) sourcePanel=\(sourcePanelId.map { String($0.uuidString.prefix(5)) } ?? "none")"
         )
@@ -9543,6 +12609,7 @@ extension Workspace: BonsplitDelegate {
             configTemplate: inheritedConfig,
             portOrdinal: portOrdinal
         )
+        configureTerminalPanel(newPanel)
         panels[newPanel.id] = newPanel
         panelTitles[newPanel.id] = newPanel.displayTitle
         seedTerminalInheritanceFontPoints(panelId: newPanel.id, configTemplate: inheritedConfig)
@@ -9564,7 +12631,7 @@ extension Workspace: BonsplitDelegate {
         surfaceIdToPanelId[newTabId] = newPanel.id
         normalizePinnedTabs(in: newPane)
 #if DEBUG
-        dlog(
+        cmuxDebugLog(
             "split.didSplit.autoCreate.done pane=\(newPane.id.uuidString.prefix(5)) " +
             "panel=\(newPanel.id.uuidString.prefix(5))"
         )
@@ -9582,6 +12649,85 @@ extension Workspace: BonsplitDelegate {
         }
     }
 
+    private func selectedTerminalPanel(inPane pane: PaneID) -> TerminalPanel? {
+        guard let selectedTab = bonsplitController.selectedTab(inPane: pane),
+              let panelId = panelIdFromSurfaceId(selectedTab.id) else {
+            return nil
+        }
+        return terminalPanel(for: panelId)
+    }
+
+    private func executeSurfaceTabBarCommandButton(identifier: String, inPane pane: PaneID) {
+        guard let executable = surfaceTabBarCommandButtons[identifier],
+              let globalConfigPath = surfaceTabBarButtonGlobalConfigPath else {
+            return
+        }
+        let presentingWindow = selectedTerminalPanel(inPane: pane)?.hostedView.window
+            ?? NSApp.keyWindow
+            ?? NSApp.mainWindow
+
+        if let workspaceCommand = executable.workspaceCommand {
+            bonsplitController.focusPane(pane)
+            if let selectedTab = bonsplitController.selectedTab(inPane: pane) {
+                applyTabSelection(tabId: selectedTab.id, inPane: pane)
+            }
+
+            let paneDirectory = selectedTerminalPanel(inPane: pane).flatMap { terminal -> String? in
+                for candidate in [panelDirectories[terminal.id], terminal.requestedWorkingDirectory] {
+                    let trimmed = candidate?.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if let trimmed, !trimmed.isEmpty {
+                        return trimmed
+                    }
+                }
+                return nil
+            }
+            let rawCwd = paneDirectory ?? currentDirectory
+            let trimmedCwd = rawCwd.trimmingCharacters(in: .whitespacesAndNewlines)
+            let baseCwd = trimmedCwd.isEmpty ? FileManager.default.homeDirectoryForCurrentUser.path : trimmedCwd
+            guard let tabManager = owningTabManager else { return }
+            _ = CmuxConfigExecutor.execute(
+                command: workspaceCommand.command,
+                tabManager: tabManager,
+                baseCwd: baseCwd,
+                configSourcePath: workspaceCommand.sourcePath,
+                globalConfigPath: globalConfigPath,
+                displayTitle: executable.button.title ?? executable.button.tooltip ?? workspaceCommand.command.name,
+                actionID: executable.button.id,
+                icon: executable.button.icon ?? executable.button.action.defaultButtonIcon,
+                iconSourcePath: executable.button.iconSourcePath,
+                presentingWindow: presentingWindow
+            )
+            return
+        }
+
+        guard let command = executable.button.terminalCommand else { return }
+        let target = executable.button.resolvedTerminalCommandTarget
+        let didExecute = CmuxConfigExecutor.prepareShellInputIfAuthorized(
+            command,
+            confirm: executable.button.confirm ?? false,
+            actionID: executable.button.id,
+            target: target,
+            configSourcePath: executable.terminalCommandSourcePath ?? surfaceTabBarButtonSourcePath,
+            globalConfigPath: globalConfigPath,
+            displayTitle: executable.button.title ?? executable.button.tooltip,
+            icon: executable.button.icon ?? executable.button.action.defaultButtonIcon,
+            iconSourcePath: executable.button.iconSourcePath,
+            presentingWindow: presentingWindow
+        ) { [weak self] shellInput in
+            guard let self else { return }
+            self.bonsplitController.focusPane(pane)
+            switch target {
+            case .currentTerminal:
+                self.selectedTerminalPanel(inPane: pane)?.sendInput(shellInput)
+            case .newTabInCurrentPane:
+                _ = self.newTerminalSurface(inPane: pane, focus: true, initialInput: shellInput)
+            }
+        }
+        guard didExecute else {
+            return
+        }
+    }
+
     func splitTabBar(_ controller: BonsplitController, didRequestNewTab kind: String, inPane pane: PaneID) {
         switch kind {
         case "terminal":
@@ -9591,6 +12737,16 @@ extension Workspace: BonsplitDelegate {
         default:
             _ = newTerminalSurface(inPane: pane)
         }
+    }
+
+    func splitTabBar(_ controller: BonsplitController, didRequestCustomAction identifier: String, inPane pane: PaneID) {
+#if DEBUG
+        cmuxDebugLog(
+            "split.customAction.request workspace=\(id.uuidString.prefix(5)) " +
+            "pane=\(pane.id.uuidString.prefix(5)) identifier=\(identifier)"
+        )
+#endif
+        executeSurfaceTabBarCommandButton(identifier: identifier, inPane: pane)
     }
 
     func splitTabBar(_ controller: BonsplitController, didRequestTabContextAction action: TabContextAction, for tab: Bonsplit.Tab, inPane pane: PaneID) {
@@ -9637,7 +12793,7 @@ extension Workspace: BonsplitDelegate {
     }
 
     func splitTabBar(_ controller: BonsplitController, didChangeGeometry snapshot: LayoutSnapshot) {
-        _ = snapshot
+        tmuxLayoutSnapshot = snapshot
         scheduleTerminalGeometryReconcile()
         if !isDetachingCloseTransaction {
             scheduleFocusReconcile()
