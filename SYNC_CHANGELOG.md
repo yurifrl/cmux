@@ -1,3 +1,56 @@
+## Sync 2026-04-27 08:31 UTC — 803 commits from upstream
+
+- 36d41696 Address Greptile P1: surface lock-wait notice and rehash hint
+- 72e0ebba fix: add AppleEvents privacy usage description
+- 587abaf1 Quiet reload.sh: log to file, summary on success, dump on failure
+- 5ea2c767 Add Release build guard to CI
+- 2880f815 Fix nightly Release build debug feed guards
+- e1336506 Add Feed sidebar + cmux feed-hook + OpenCode plugin (workstream MVP) (#3057)
+- 57220bd0 Delay initial bootstrap until launch opens settle
+- 39dac431 Preserve active window on app reopen
+- 557b105b Harden hidden bootstrap window handling
+- 79ca9498 Start socket after main window bootstrap
+- 9d9a2501 Bootstrap main window from app launch
+- b10ef232 Keep window context state synchronized
+- ae9bdb1d Fix duplicate window registration ordering
+- 9e805f9e Make AppDelegate own main window bootstrap
+- 4913d171 Guard against duplicate restored main windows
+- 092c4299 Hide portals for unmounted workspaces
+- b2f00745 Address workspace close review feedback
+- 5a866ac6 Present workspace close confirmation as sheet
+- d2ad8d89 Add regression test for workspace close prompt modality
+- e194ceb4 Keep selected workspace visible in sidebar
+- e05bee7e Add sidebar workspace scroll regression test
+- 51741a54 Improve default light and dark theme fallback (#3123)
+- 7ebf2233 Decouple debug logging from Bonsplit (#3128)
+- 444197f3 Add configurable cmux.json workspace and tab bar actions
+- 7102fdf3 Restore previous sessions and resume agents (#2978)
+- 03a0c14b Apply sidebar background to right panel
+- fdaf873c Split AppDelegate support code into focused files (#3104)
+- ad20c651 Split support code out of large Swift files
+- 3e84c162 Fix minimal-mode traffic-light inset and new-window Bonsplit tab bar (#3055)
+- 54b6a42b Revert "Stop idle tmux overlay animation churn (#3078)" (#3086)
+- 68387746 Stop idle tmux overlay animation churn (#3078)
+- c47634f0 Issue 3081 workspace color left rail (#3082)
+- e0f80ccf Fix AX window polling stalls with app hierarchy caching (#2986)
+- e39f5e02 Fix main-thread blocking in workspace PR refresh (#3036)
+- bd02bed8 Drop stale merged PR from sidebar badge selection (#3054) (#3063)
+- 1a95cbba Explain shortcut recorder rejections inline (fixes #2988) (#3035)
+- 0eed21c3 Use workspace color for selected sidebar rows (#3038)
+- 0bdf6949 Fix terminal blanking after OSC completion notifications (#3048)
+- fd93a7c8 web: give the Stack Auth handler layout the site's Geist fonts (#3043)
+- 27e860f0 Trim Stack Auth env values before StackServerApp (#3041)
+- 3885a0b5 Add unified config settings utility window (#3024)
+- 92769d74 Fix DebugEventLog NSFileHandle ObjC exception crash (#3034)
+- d56cf9bc Bring minimal macOS auth scaffolding to main (#3027)
+- 1bfb2266 Pin regular-weight Japanese auto-fallback face (#3015)
+- 3af1173a Fix 100% CPU from ContentView publisher feedback loop (fixes #3020) (#3028)
+- e9768936 Serialize xcodebuild and fetch prebuilt GhosttyKit to unblock Xcode 26 builds (#2981)
+- 8ff5f77f Fix #3011 blank terminal after workspace selection (#3012)
+- 6fe581ef Fix sessions panel CPU loop on nightly (#3013)
+- cd0eb467 Speed up large terminal pastes (#2940) (#3000)
+- 3698f137 Fix Cmd/Ctrl shortcut hint parity (#2992) (#2994)
+
 ## Sync 2026-03-17 14:51 UTC — 44 commits from upstream
 
 - 8d8fadbb Add hidden CLI command for live terminal debugging (#1599)
